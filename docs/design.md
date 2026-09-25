@@ -335,13 +335,14 @@ worker 每次运行都会处理 mailbox 中全部未完成的任务，包括之�
         displayName: LiteLLM proxy
         apiKeyEnv: LITELLM_API_KEY
         api: openai-completions
-        baseURL: http://host:port/v1
+        baseURL: !!js process.env.LITELLM_BASE_URL
         models:
           - id: DeepSeek-V4-flash
             contextWindow: 262144
 ```
 
-对应的 `engine` 配置是 `provider: litellm`、`model: DeepSeek-V4-flash`、`env_passthrough: [LITELLM_API_KEY]`、`patches: [engine/litellm.patch.yml]`。
+对应的 `engine` 配置是 `provider: litellm`、`model: DeepSeek-V4-flash`、`env_passthrough: [LITELLM_API_KEY, LITELLM_BASE_URL]`、`patches: [engine/litellm.patch.yml]`。
+接口地址和密钥都通过环境变量传入，不写进项目文件。
 
 ### 5.9 特征发现
 
