@@ -1,0 +1,18 @@
+name: default
+budget: 30
+seed: 0
+features: all          # or a list of feature names, or {feature: weight}
+strategies:
+  # Uncomment once the outcome group is extracted.
+  # - kind: target
+  #   label: frustrated
+  #   quota: 0.3
+  #   where: "user_frustration >= {user_frustration.high}"
+  #   within: diversity
+  - kind: outlier
+    label: outlier
+    quota: 0.3
+    method: isolation_forest
+  - kind: diversity
+    label: diverse
+    quota: rest

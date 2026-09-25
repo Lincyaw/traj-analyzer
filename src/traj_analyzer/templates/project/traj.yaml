@@ -1,0 +1,32 @@
+# traj-analyzer project configuration; docs/design.md in the traj-analyzer repository describes every field.
+version: 1
+
+datasets:
+  claude-code:
+    adapter: claude_code
+    input: [~/.claude/projects/*/*.jsonl]
+    exclude: []
+    options:
+      include_thinking: false
+      include_sidechains: false
+      min_user_turns: 1
+
+render:
+  max_step_chars: 4000
+  chunk_chars: 24000
+
+engine:
+  kind: deepseek
+  dsh_home: ~/.dsh
+  model: deepseek-v4-flash
+  provider: deepseek-official
+  reasoning_effort: null
+  env_passthrough: [DEEPSEEK_API_KEY]
+
+extract:
+  workers: 4
+  timeout_s: 900
+  attempts: 2
+
+sampling:
+  vector_length: 10

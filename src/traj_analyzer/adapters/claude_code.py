@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+from traj_analyzer.schema import Step, Trajectory
+
+
+class ClaudeCodeAdapter:
+    """Claude Code session files, `~/.claude/projects/<project>/<session>.jsonl`.
+
+    Conversation records are read in file order, so turns abandoned by a rewind stay in the trajectory.
+    """
+
+    def __init__(
+        self,
+        include_thinking: bool = False,
+        include_sidechains: bool = False,
+        include_meta: bool = False,
+        min_user_turns: int = 1,
+    ) -> None:
+        self.include_thinking = include_thinking
+        self.include_sidechains = include_sidechains
+        self.include_meta = include_meta
+        self.min_user_turns = min_user_turns
+
+    def read(self, path: Path, dataset: str) -> Iterator[Trajectory]:
+        steps: list[Step] = []
+        tool_names: dict[str, str] = {}
+        metadata: dict[str, Any] = {"file": str(path)}
+        with path.open(encoding="utf-8") as lines:
+            for number, line in enumerate(lines, start=1):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(f"{path}:{number}: {error}") from error
+                kind = record["type"]
+                if kind == "ai-title":
+                    metadata["title"] = record["aiTitle"]
+                if kind not in ("user", "assistant"):
+                    continue
+                if record.get("isSidechain") and not self.include_sidechains:
+                    continue
+                if record.get("isMeta") and not self.include_meta:
+                    continue
+                for key in ("cwd", "gitBranch", "version"):
+                    metadata.setdefault(key, record.get(key))
+                message = record["message"]
+                if kind == "assistant":
+                    metadata.setdefault("model", message["model"])
+                for step in self._steps(kind, message["content"], record["timestamp"], tool_names):
+                    steps.append(step.model_copy(update={"index": len(steps)}))
+        user_turns = sum(1 for s in steps if s.role == "user" and s.kind == "message")
+        if user_turns < self.min_user_turns:
+            return
+        metadata["started_at"] = steps[0].timestamp
+        metadata["ended_at"] = steps[-1].timestamp
+        yield Trajectory(id=path.stem, dataset=dataset, metadata=metadata, steps=steps)
+
+    def _steps(
+        self, kind: str, content: Any, timestamp: str, tool_names: dict[str, str]
+    ) -> Iterator[Step]:
+        if isinstance(content, str):
+            yield Step(index=0, role=kind, content=content, timestamp=timestamp)  # type: ignore[arg-type]
+            return
+        for block in content:
+            match block["type"]:
+                case "text":
+                    yield Step(index=0, role=kind, content=block["text"],  # type: ignore[arg-type]
+                               timestamp=timestamp)
+                case "image":
+                    yield Step(index=0, role=kind, content="[image]",  # type: ignore[arg-type]
+                               timestamp=timestamp)
+                case "thinking":
+                    # Signed thinking blocks often carry an empty text; they produce no step.
+                    if self.include_thinking and block["thinking"]:
+                        yield Step(index=0, role="assistant", kind="thinking",
+                                   content=block["thinking"], timestamp=timestamp)
+                case "tool_use":
+                    tool_names[block["id"]] = block["name"]
+                    yield Step(index=0, role="assistant", kind="tool_call", name=block["name"],
+                               content=json.dumps(block["input"], ensure_ascii=False),
+                               timestamp=timestamp)
+                case "tool_result":
+                    yield Step(index=0, role="tool", kind="tool_result",
+                               name=tool_names[block["tool_use_id"]],
+                               content=_result_text(block["content"]),
+                               is_error=bool(block.get("is_error")), timestamp=timestamp)
+                case "fallback":
+                    yield Step(index=0, role="system",
+                               content=f"model fallback from {block['from']['model']} "
+                                       f"to {block['to']['model']}",
+                               timestamp=timestamp)
+                case other:
+                    raise ValueError(f"Unknown Claude Code content block type: {other}")
+
+
+def _result_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    parts = []
+    for item in content:
+        match item["type"]:
+            case "text":
+                parts.append(item["text"])
+            case "image":
+                parts.append("[image]")
+            case "tool_reference":
+                parts.append(f"[tool_reference: {item['tool_name']}]")
+            case other:
+                raise ValueError(f"Unknown Claude Code tool result item type: {other}")
+    return "\n".join(parts)

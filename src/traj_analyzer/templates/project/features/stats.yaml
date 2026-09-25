@@ -1,0 +1,14 @@
+group: stats
+description: Zero-cost statistics computed without an LLM.
+engine: builtin
+evidence: false
+features:
+  - {name: n_steps, type: scalar, fn: n_steps, description: Number of steps.}
+  - {name: n_user_turns, type: scalar, fn: n_user_turns, description: User messages.}
+  - {name: n_tool_calls, type: scalar, fn: n_tool_calls, description: Tool calls.}
+  - {name: tool_error_rate, type: scalar, fn: tool_error_rate, range: [0, 1],
+     description: Share of tool results flagged as errors.}
+  - {name: total_chars, type: scalar, fn: total_chars, description: Characters of content.}
+  - {name: duration_minutes, type: scalar, fn: duration_minutes,
+     description: Wall-clock time from first to last step.}
+  - {name: tools_used, type: set, fn: tools_used, description: Distinct tool names called.}
