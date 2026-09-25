@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -109,9 +110,12 @@ def discover(project: Project | None) -> dict[str, OperatorRef]:
 
 def _load(path: Path) -> Operator:
     if path not in _LOADED:
-        spec = importlib.util.spec_from_file_location(f"traj_operator_{abs(hash(path))}", path)
+        name = f"traj_operator_{hashlib.sha256(str(path).encode()).hexdigest()[:16]}"
+        spec = importlib.util.spec_from_file_location(name, path)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
+        # Pydantic resolves postponed annotations through sys.modules, so the module must be registered first.
+        sys.modules[name] = module
         spec.loader.exec_module(module)
         operator = getattr(module, "OPERATOR", None)
         if not isinstance(operator, Operator):
@@ -129,7 +133,7 @@ def instantiate(ref: OperatorRef, use: OperatorUse) -> Instance:
     features = []
     for output in outputs:
         name = output.name
-        if use.alias is not None:
+        if use.alias is not None and ref.operator.rename_outputs:
             name = use.alias if len(outputs) == 1 else f"{use.alias}_{output.name}"
         original[name] = output.name
         features.append(FeatureSpec.model_validate({**output.model_dump(), "name": name}))

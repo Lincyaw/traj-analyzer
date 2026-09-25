@@ -96,7 +96,7 @@ def test_chunks_break_between_steps() -> None:
 
 def test_feature_spec_rejects_bad_shapes() -> None:
     with pytest.raises(ValidationError):
-        FeatureSpec(name="c", type="category", description="no labels")
+        FeatureSpec(name="d", type="distribution", description="no labels")
     with pytest.raises(ValidationError):
         FeatureSpec(name="v", type="vector", description="neither per nor length")
     with pytest.raises(ValidationError):
@@ -114,9 +114,10 @@ def test_library_operators_load_and_render() -> None:
     refs = discover(None)
     assert {"stats.basic", "stats.tool_usage", "outcome.task_type", "outcome.task_completed",
             "collab.user_frustration", "collab.failure_modes"} <= set(refs)
-    for ref in refs.values():
+    for name, ref in refs.items():
         outputs = ref.operator.outputs(ref.operator.params())
-        assert outputs and all(isinstance(f, FeatureSpec) for f in outputs)
+        assert all(isinstance(f, FeatureSpec) for f in outputs)
+        assert outputs or name == "meta.fields"
 
 
 @pytest.fixture
@@ -289,6 +290,36 @@ def test_cli_operators_enable_and_disable(project: Project, capsys: pytest.Captu
 
     assert main(["operators", "disable", "pushback"]) == 0
     assert "collab" not in {g.name for g in load_groups(Project.load(project.root))}
+
+
+def test_meta_fields_copy_metadata_into_features(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
+    subset = json.dumps({"key": "subset_name", "type": "category", "required": False})
+    assert main(["operators", "enable", "meta.fields", "--as", "meta", "--param", f"fields={{subset: {subset}}}"]) == 0
+    capsys.readouterr()
+    reloaded = Project.load(project.root)
+    (report,) = extract(reloaded, groups=["meta"])
+    assert report.ok == 70
+    frame = build_frame(reloaded, load_groups(reloaded, ["meta"]), load_index(reloaded), vector_length=4)
+    records = [json.loads(line) for line in (DATA / "toucan.jsonl").open(encoding="utf-8")]
+    expected = {f"toucan/{r['uuid']}": r["subset_name"] for r in records}
+    column = frame.query["subset"]
+    assert {k: column[k] for k in expected} == expected
+    assert column[[k for k in column.index if k.startswith("ultrachat/")]].isna().all()
+    assert {f"subset__{name.replace('-', '_')}" for name in expected.values()} <= set(frame.distance.columns)
+
+    strict = json.dumps({"key": "subset_name", "type": "category"})
+    assert main(["operators", "disable", "meta"]) == 0
+    assert main(["operators", "enable", "meta.fields", "--as", "meta", "--param", f"fields={{subset: {strict}}}"]) == 0
+    with pytest.raises(KeyError, match="subset_name"):
+        extract(Project.load(project.root), groups=["meta"])
+
+
+def test_hidden_metadata_stays_out_of_the_markdown() -> None:
+    (trajectory,) = ClaudeCodeAdapter().read(SESSION, "cc")
+    shown, _ = render_markdown(trajectory, RenderConfig())
+    hidden, _ = render_markdown(trajectory, RenderConfig(hide_metadata=["title", "cwd"]))
+    assert f'"title": "{trajectory.metadata["title"]}"' in shown
+    assert '"title"' not in hidden and '"cwd"' not in hidden and '"gitBranch"' in hidden
 
 
 def test_changed_content_makes_features_stale(project: Project, capsys: pytest.CaptureFixture[str]) -> None:

@@ -28,6 +28,8 @@ class DatasetConfig(_Strict):
 class RenderConfig(_Strict):
     max_step_chars: int = Field(default=4000, ge=1)
     chunk_chars: int = Field(default=24000, ge=1)
+    hide_metadata: list[str] = Field(default_factory=list)
+    """Metadata keys left out of the rendered Markdown, so that LLM operators do not see them."""
 
 
 class EngineConfig(_Strict):

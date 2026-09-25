@@ -36,7 +36,7 @@ def value_type(feature: FeatureSpec) -> Any:
         case "boolean":
             return bool
         case "category":
-            return Literal[labels]  # type: ignore[valid-type]
+            return Literal[labels] if labels else Annotated[str, Field(min_length=1)]  # type: ignore[valid-type]
         case "set":
             item = Literal[labels] if labels else str  # type: ignore[valid-type]
             return Annotated[list[item], Field(json_schema_extra={"uniqueItems": True}),
@@ -143,6 +143,8 @@ def _render_feature(feature: FeatureSpec) -> str:
         lines += [f"  - `{label}`: {text}" for label, text in feature.labels.items()]
     elif feature.type == "set":
         lines.append("- A list of short distinct strings, possibly empty.")
+    elif feature.type == "category":
+        lines.append("- One short label.")
     return "\n".join(lines) + "\n"
 
 

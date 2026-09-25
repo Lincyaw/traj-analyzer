@@ -13,6 +13,7 @@ from traj_analyzer.operators.catalog import Group
 from traj_analyzer.project import ConfigError, Project
 
 MAX_FREE_LABELS = 30
+MAX_FREE_CATEGORIES = 100
 
 
 @dataclass
@@ -113,8 +114,8 @@ def _expand(
             col = pd.to_numeric(series.map(lambda v: None if v is None else float(v)))
             return {name: col}, {name: col}
         case "category":
-            onehot = {f"{name}__{ident(lb)}": (series == lb).astype(float).where(series.notna())
-                      for lb in feature.labels or ()}
+            labels = list(feature.labels or ()) or _top_values(series)
+            onehot = {f"{name}__{ident(lb)}": (series == lb).astype(float).where(series.notna()) for lb in labels}
             return {name: series.astype("string")}, onehot
         case "set":
             labels = list(feature.labels or ()) or _top_labels(series)
@@ -160,6 +161,11 @@ def _resample(values: list[float], length: int) -> list[float]:
         return [float(values[0])] * length
     source = np.linspace(0, 1, len(values))
     return [float(v) for v in np.interp(np.linspace(0, 1, length), source, values)]
+
+
+def _top_values(series: pd.Series) -> list[str]:
+    counts = series.dropna().value_counts()
+    return [str(v) for v in counts.index[:MAX_FREE_CATEGORIES]]
 
 
 def _top_labels(series: pd.Series) -> list[str]:

@@ -124,6 +124,9 @@ Anthropic 块中的 `tool_result` 转换为 role 为 `tool` 的步骤，即使�
 分片在步与步之间切分，每片不超过 `render.chunk_chars` 个字符，片头写入 `<!-- chunk 3 -->` 标记。
 单个步骤超过上限时独占一片。
 
+Markdown 开头的 JSON 块列出 trajectory 的元数据。
+`render.hide_metadata` 中列出的键不写入 Markdown，llm 算子因此看不到这些信息，例如模型名和评测结果；这些键仍然保存在 `<id>.json` 中，code 算子可以读取。
+
 ## 5. 算子
 
 ### 5.1 算子文件
@@ -142,6 +145,7 @@ Anthropic 块中的 `tool_result` 转换为 role 为 `tool` 的步骤，即使�
 | `guidance(params)` | 只用于 llm 算子，返回写入 instruction 的判断标准 |
 | `requires(trajectory)` | 判断算子是否适用于这条 trajectory，不适用时特征值为空 |
 | `tags` | 场景标签，例如 `chat`、`agent`，用于筛选算子库 |
+| `rename_outputs` | 缺省为 true；为 false 时，启用时的 `as` 只改实例名，不改特征名，用于特征名本身由参数决定的算子 |
 
 下面是一个 llm 算子文件：
 
@@ -193,6 +197,12 @@ OPERATOR = Operator(
 | `outcome.task_completed` | llm | `task_completed` |
 | `collab.user_frustration` | llm | `user_frustration`、`frustration_curve` |
 | `collab.failure_modes` | llm | `failure_modes` |
+| `meta.fields` | code | 由参数 `fields` 决定，把指定的元数据字段复制为特征 |
+
+`meta.fields` 的参数 `fields` 是特征名到字段定义的映射。
+字段定义包括元数据键 `key`、特征类型 `type`（`scalar`、`boolean`、`category`、`set`），以及可选的 `labels`、`range`、`thresholds`、`required`。
+`required` 缺省为 true，元数据缺少该键时提取报错终止；为 false 时特征值为空。
+这个算子用来把评测结果、模型名、案例属性等外部信息放进特征表，供采样条件和报告使用。
 
 `collab.user_frustration` 和 `collab.failure_modes` 把用户纠正 assistant 的内容计为不满和失误，即使纠正的语气很平和。
 
@@ -250,7 +260,7 @@ calls:
 |---|---|---|---|
 | `scalar` | 浮点数 | | `range` |
 | `boolean` | 布尔值 | | |
-| `category` | 单个标签 | `labels` | |
+| `category` | 单个标签 | | `labels`，缺省时为任意非空字符串 |
 | `set` | 互不相同的标签列表 | | `labels`，缺省时为自由字符串 |
 | `vector` | 浮点数列表 | `per: chunk` 或 `length: k` | `range` |
 | `distribution` | 标签到概率的映射，总和为 1 | `labels` | |
@@ -340,7 +350,7 @@ worker 每次运行都会处理 mailbox 中全部未完成的任务，包括之�
 | type | 查询列，用于条件筛选 | 距离列，用于聚类和离群检测 |
 |---|---|---|
 | scalar、boolean | `name` | `name` |
-| category | `name`，字符串 | 每个标签一列 one-hot |
+| category | `name`，字符串 | 每个标签一列 one-hot；没有 `labels` 时取出现次数最多的 100 个值 |
 | set | 每个标签一列 multi-hot，以及 `name__count` | 每个标签一列 multi-hot |
 | vector | `name__max`、`__min`、`__mean`、`__first`、`__last` | 重采样到 `sampling.vector_length` 个点，加上五个聚合列 |
 | distribution | 每个标签一列概率 | 同左 |

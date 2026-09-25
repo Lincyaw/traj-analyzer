@@ -34,8 +34,8 @@ class FeatureSpec(BaseModel):
 
     @model_validator(mode="after")
     def _shape(self) -> FeatureSpec:
-        if self.type in ("category", "distribution") and not self.labels:
-            raise ValueError(f"{self.name}: type {self.type} needs labels")
+        if self.type == "distribution" and not self.labels:
+            raise ValueError(f"{self.name}: type distribution needs labels")
         if self.type == "vector" and (self.per is None) == (self.length is None):
             raise ValueError(f"{self.name}: vector needs exactly one of per and length")
         if self.type != "vector" and (self.per or self.length):
@@ -56,6 +56,7 @@ class Operator:
     A code operator computes its outputs with `compute`, which returns a value for every output name.
     An LLM operator contributes its outputs and `guidance` to the instruction of its call group.
     `requires` marks the trajectories the operator applies to; the others get empty values.
+    `rename_outputs` is false for operators whose params already name their outputs, so `as` keeps those names.
     """
 
     kind: Literal["code", "llm"]
@@ -66,6 +67,7 @@ class Operator:
     compute: Callable[[Trajectory, Any], dict[str, Any]] | None = None
     guidance: Callable[[Any], str] | None = None
     requires: Callable[[Trajectory], bool] | None = None
+    rename_outputs: bool = True
 
     def __post_init__(self) -> None:
         if (self.kind == "code") != (self.compute is not None):
