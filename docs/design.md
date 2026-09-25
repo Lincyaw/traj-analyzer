@@ -44,7 +44,7 @@ flowchart TD
 | `samplers/<name>.yaml` | 采样策略 | 是 |
 | `adapters/*.py` | 项目自带的适配器 | 是 |
 | `reports/*.md` | Claude Code 撰写的报告 | 是 |
-| `.claude/skills/` | `traj-discover` 和 `traj-report` 两个 skill | 是 |
+| `.claude/skills/` | `traj-features`、`traj-discover` 和 `traj-report` 三个 skill | 是 |
 | `.traj/datasets/<dataset>/` | `<id>.json`、`<id>.md`、`index.jsonl` | 否 |
 | `.traj/instructions/` | 由调用组生成的 instruction 文件 | 否 |
 | `.traj/mailbox/` | aifn 的任务与结论，同时作为缓存 | 否 |
@@ -145,6 +145,11 @@ Markdown 开头依次是数据集说明和元数据 JSON 块。
 
 算子是带参数的、可复用的特征提取器。
 一个算子是一个 Python 文件，文件中定义 `OPERATOR`，它是 `traj_analyzer.operators.base.Operator` 的实例。
+
+每个特征都是原子化的：取值是“是或否”，或者是从文本中照抄的集合，看文本就能直接得出，不需要多步推理。
+结构化字段能回答的问题交给 code 算子；需要读懂用户或模型所写文字的问题交给 llm 算子，例如“用户是否纠正了 assistant”。
+“是否过早锁定假设”这类需要综合判断的结论不做成特征，由采样条件或报告组合原子特征得出。
+项目模板中的 `traj-features` skill 给出完整的规则和示例。
 算子名由文件相对算子根目录的路径得到，例如 `collab/user_frustration.py` 的算子名是 `collab.user_frustration`。
 
 | 字段 | 含义 |

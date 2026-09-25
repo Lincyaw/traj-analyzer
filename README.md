@@ -31,8 +31,7 @@ traj sample
 ```
 
 `traj init` 生成的 `traj.yaml` 已经启用了内置算子库中的全部算子，四个 llm 算子共用 `outcome` 调用组。
-项目还包含 `traj-discover` 和 `traj-report` 两个 skill。
-在项目目录中启动 Claude Code 后，用前者启用或编写算子，用后者撰写报告。
+项目还包含三个 skill：`traj-features` 说明特征怎样设定和提取，`traj-discover` 用来阅读样本并启用或编写算子，`traj-report` 用来撰写报告。
 
 所有命令都向 stdout 输出 JSON。
 退出码：0 表示成功，1 表示运行错误，2 表示用法或配置错误。

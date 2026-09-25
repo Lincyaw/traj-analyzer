@@ -17,17 +17,13 @@ Features come from operators; one operator is one Python file.
    Note how the trajectories differ: what the user wanted, how the run went, where it went wrong, and what was unusual.
 3. For each difference, look for an operator that captures it with `traj operators show <name>`.
    Enable it with `traj operators enable <name>`, adding `--call` to group LLM operators into one call, `--param key=value` to change parameters, and `--as` to enable the same operator twice.
-4. For differences no operator captures, write a new operator in the project's `operators/<namespace>/<name>.py`.
-   Copy the structure of a library operator shown by `traj operators show`.
-   - Use a code operator when the value follows from the trajectory by rule, and an LLM operator when it needs judgement.
-   - Give every output a `description` precise enough that two readers would give the same value.
-   - Give category, set and distribution outputs `labels` with one line definitions, covering every case seen, plus `other` where needed.
-   - Give scalars and vectors a `range`, and `thresholds` when a cut off matters for sampling.
-   - Put the judging scale in `guidance`, and set `requires` when the operator only makes sense for some trajectories.
-   Then enable it.
+4. For differences no operator captures, write a new operator in the project's `operators/<namespace>/<name>.py`, following the `traj-features` skill.
+   Break every difference into atomic features: yes-or-no questions or sets that can be read off the text in one place.
+   A difference that needs judgement, such as "the agent anchored early", becomes a combination of atomic features that a sampler condition or a report puts together.
+   Then enable the operator.
 5. Run `traj validate` and fix every error.
 6. Try new LLM operators on a few trajectories with `traj extract --group <call> --limit 5`.
    Run `traj show <key>` for each one and check the values and evidence against the file.
-   Revise the operators where the answers were wrong or inconsistent.
+   Where answers were wrong or inconsistent, split the feature into simpler ones.
 7. Report the enabled and new operators, the purpose of each one, and what the trial run showed.
    Leave the changes uncommitted so the user can review the diff, unless the user asked for a commit.
