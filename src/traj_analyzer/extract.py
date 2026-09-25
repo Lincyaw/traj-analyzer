@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Protocol
+from uuid import uuid4
 
-from aifn import Handle, Refused, Returned, Stage, Workspace
-from pydantic import BaseModel
+from aifn import Call, Handle, Mailbox, Refused, Returned, Workspace
 
-from traj_analyzer.features.spec import ExtractRequest, validate_value
+from traj_analyzer.features.spec import ExtractRequest, value_validator
 from traj_analyzer.features.table import FeatureRow, write_group
 from traj_analyzer.ingest import IndexRow, load_index, load_trajectory
 from traj_analyzer.operators.catalog import Group, Instance, load_groups
 from traj_analyzer.project import ConfigError, Project
-from traj_analyzer.runtime import build_function, engine_env, mailbox
+from traj_analyzer.runtime import engine_env, mailbox, model_name, submitting_function
 
 
 @dataclass
@@ -36,11 +38,11 @@ def select_rows(
 ) -> list[IndexRow]:
     rows = load_index(project, datasets)
     if keys:
-        known = {row.key for row in rows}
-        unknown = sorted(set(keys) - known)
+        wanted = set(keys)
+        unknown = sorted(wanted - {row.key for row in rows})
         if unknown:
             raise ConfigError(f"Unknown trajectory keys: {unknown}")
-        rows = [row for row in rows if row.key in set(keys)]
+        rows = [row for row in rows if row.key in wanted]
     return rows[:limit] if limit else rows
 
 
@@ -78,145 +80,161 @@ def extract(
     dry_run: bool = False,
     runner: WorkerRunner | None = None,
 ) -> list[GroupReport]:
+    """Compute code groups and collect LLM groups for the selected trajectories, overwriting their rows.
+
+    Code features are recomputed on every run. LLM calls whose request and instruction are unchanged are answered
+    from the aifn mailbox, so a rerun only calls the model for new or changed trajectories and operators.
+    """
     runner = runner or SubprocessWorkers()
     rows = select_rows(project, datasets, keys, limit)
     selected = load_groups(project, groups)
-    llm = [group for group in selected if not group.is_code]
+    code = [g for g in selected if g.is_code]
+    llm = [g for g in selected if not g.is_code]
     if llm and not dry_run:
         runner.check(project)
-    reports = [_code(project, group, rows, dry_run) for group in selected if group.is_code]
+    code_reports, applies = _scan(project, code, llm, rows, dry_run)
     if not llm:
-        return reports
-    applies = {group.name: _applicability(project, group, rows) for group in llm}
-    issued = {}
-    llm_reports = {}
+        return code_reports
+    box = mailbox(project)
+    known = _known_calls(box)
+    issued: dict[str, list[tuple[Handle[Any], IndexRow]]] = {}
+    reports: dict[str, GroupReport] = {}
     for group in llm:
         callable_rows = [row for row in rows if any(applies[group.name][row.key].values())]
-        issued[group.name] = _issue(project, group, callable_rows, dry_run)
+        issued[group.name] = _issue(project, box, known, group, callable_rows, dry_run)
         cached = sum(handle.poll() is not None for handle, _ in issued[group.name])
-        llm_reports[group.name] = GroupReport(group.name, total=len(rows), cached=cached,
-                                              not_applicable=len(rows) - len(callable_rows))
-    outstanding = sum(len(issued[g.name]) - llm_reports[g.name].cached for g in llm)
-    if not dry_run and outstanding:
+        reports[group.name] = GroupReport(group.name, total=len(rows), cached=cached,
+                                          not_applicable=len(rows) - len(callable_rows))
+    if not dry_run and any(len(issued[g.name]) > reports[g.name].cached for g in llm):
         runner.run(project, workers or project.config.extract.workers)
     for group in llm:
-        _collect(project, group, rows, issued[group.name], applies[group.name], llm_reports[group.name], dry_run)
-    return [*reports, *llm_reports.values()]
+        handles = {row.key: handle for handle, row in issued[group.name]}
+        out = _collect(group, rows, handles, applies[group.name], reports[group.name])
+        if not dry_run:
+            write_group(project, group.name, out)
+    return [*code_reports, *reports.values()]
 
 
-def _not_applicable(group: Group, instance: Instance, row: IndexRow) -> list[FeatureRow]:
-    return [FeatureRow(key=row.key, group=group.name, feature=f.name, value=None, detail="not applicable",
-                       spec_hash=group.spec_hash(), sha256=row.sha256) for f in instance.features]
-
-
-def _code(project: Project, group: Group, rows: list[IndexRow], dry_run: bool) -> GroupReport:
-    report = GroupReport(group.name, total=len(rows))
-    if dry_run:
-        report.pending = len(rows)
-        return report
-    (instance,) = group.instances
-    digest = group.spec_hash()
-    out: list[FeatureRow] = []
+def _scan(
+    project: Project, code: list[Group], llm: list[Group], rows: list[IndexRow], dry_run: bool
+) -> tuple[list[GroupReport], dict[str, dict[str, dict[str, bool]]]]:
+    """Load each trajectory once to compute every code group and decide which LLM operators apply to it."""
+    reports = {g.name: GroupReport(g.name, total=len(rows)) for g in code}
+    applies: dict[str, dict[str, dict[str, bool]]] = {g.name: {} for g in llm}
+    needs_trajectory = (code and not dry_run) or any(
+        i.ref.operator.requires is not None for g in llm for i in g.instances)
+    validators = {f.name: value_validator(f) for g in code for f in g.features}
+    out: dict[str, list[FeatureRow]] = {g.name: [] for g in code}
     for row in rows:
-        trajectory = load_trajectory(project, row)
-        if not instance.applies(trajectory):
-            report.not_applicable += 1
-            out += _not_applicable(group, instance, row)
+        trajectory = load_trajectory(project, row.key) if needs_trajectory else None
+        for group in llm:
+            applies[group.name][row.key] = {
+                i.id: trajectory is None or i.applies(trajectory) for i in group.instances}
+        if dry_run:
             continue
-        values = instance.compute(trajectory)
-        out += [FeatureRow(key=row.key, group=group.name, feature=f.name, value=validate_value(f, values[f.name]),
-                           spec_hash=digest, sha256=row.sha256) for f in instance.features]
-        report.ok += 1
-    write_group(project, group.name, out)
-    return report
+        for group in code:
+            (instance,) = group.instances
+            assert trajectory is not None
+            if not instance.applies(trajectory):
+                reports[group.name].not_applicable += 1
+                out[group.name] += _not_applicable(group, instance, row.key)
+                continue
+            values = instance.compute(trajectory)
+            out[group.name] += [FeatureRow(key=row.key, group=group.name, feature=f.name,
+                                           value=validators[f.name](values[f.name])) for f in instance.features]
+            reports[group.name].ok += 1
+    for group in code:
+        if dry_run:
+            reports[group.name].pending = len(rows)
+        else:
+            write_group(project, group.name, out[group.name])
+    return list(reports.values()), applies
 
 
-def _applicability(project: Project, group: Group, rows: list[IndexRow]) -> dict[str, dict[str, bool]]:
-    if all(instance.ref.operator.requires is None for instance in group.instances):
-        return {row.key: {instance.id: True for instance in group.instances} for row in rows}
-    result = {}
-    for row in rows:
-        trajectory = load_trajectory(project, row)
-        result[row.key] = {instance.id: instance.applies(trajectory) for instance in group.instances}
-    return result
+def _not_applicable(group: Group, instance: Instance, key: str) -> list[FeatureRow]:
+    return [FeatureRow(key=key, group=group.name, feature=f.name, value=None, detail="not applicable")
+            for f in instance.features]
+
+
+def _identity(call: Call) -> str:
+    """What aifn compares to reuse a call: everything except the id and the time it was issued."""
+    return json.dumps(call.model_dump(mode="json", exclude={"id", "issued_at"}), sort_keys=True)
+
+
+def _known_calls(box: Mailbox) -> dict[str, str]:
+    """Identity of every call in the mailbox, read once; aifn's own lookup rescans the mailbox per submission."""
+    requests = box.root / "requests"
+    if not requests.is_dir():
+        return {}
+    known = {}
+    for path in requests.glob("*.json"):
+        call = Call.model_validate_json(path.read_bytes())
+        known[_identity(call)] = call.id
+    return known
 
 
 def _issue(
-    project: Project, group: Group, rows: list[IndexRow], dry_run: bool
+    project: Project, box: Mailbox, known: dict[str, str], group: Group, rows: list[IndexRow], dry_run: bool
 ) -> list[tuple[Handle[Any], IndexRow]]:
-    """Enqueue one call per row; a dry run only looks the calls up and writes nothing."""
-    stage = Stage(function=build_function(project, group), mailbox=mailbox(project))
+    """Look up or enqueue one call per row; a dry run only looks calls up and writes nothing."""
+    function = submitting_function(project, group)
+    instruction = function.instructions()
+    model = model_name(project, group)
     handles = []
     for row in rows:
-        request = ExtractRequest(trajectory_file=row.markdown, n_chunks=row.n_chunks,
-                                 sha256=row.sha256)
-        workspace = Workspace(directory=project.dataset_dir(row.dataset))
-        if dry_run:
-            call = stage.call(request, workspace=workspace)
-            handle = Handle(id=call.id, returns=stage.function.returns, mailbox=stage.mailbox)
-        else:
-            handle = stage.issue(request, workspace=workspace)
-        handles.append((handle, row))
+        request = ExtractRequest(trajectory_file=f"{row.id}.md", n_chunks=row.n_chunks, sha256=row.sha256,
+                                 model=model)
+        call = Call(id=uuid4().hex, function=function.name, request=request.model_dump(mode="json", by_alias=True),
+                    issued_at=datetime.now(UTC), workspace=Workspace(directory=project.dataset_dir(row.dataset)),
+                    instruction=instruction)
+        identity = _identity(call)
+        if identity in known:
+            call = call.model_copy(update={"id": known[identity]})
+        elif not dry_run:
+            box.issue(call)
+            known[identity] = call.id
+        handles.append((Handle(id=call.id, returns=function.returns, mailbox=box), row))
     return handles
 
 
 def _collect(
-    project: Project,
     group: Group,
     rows: list[IndexRow],
-    issued: list[tuple[Handle[Any], IndexRow]],
+    handles: dict[str, Handle[Any]],
     applies: dict[str, dict[str, bool]],
     report: GroupReport,
-    dry_run: bool,
-) -> None:
-    digest = group.spec_hash()
-    called = {row.key for _, row in issued}
+) -> list[FeatureRow]:
     out: list[FeatureRow] = []
     for row in rows:
-        if row.key not in called:
-            out += [r for i in group.instances for r in _not_applicable(group, i, row)]
-    for handle, row in issued:
-        result = handle.poll()
-        if result is None:
+        handle = handles.get(row.key)
+        result = handle.poll() if handle is not None else None
+        if handle is not None and result is None:
             report.pending += 1
             continue
-        outcome = result.outcome
-        if isinstance(outcome, Returned):
-            report.ok += 1
-            out += _rows_from_value(group, row, outcome.value, applies[row.key], report)
+        outcome = result.outcome if result is not None else None
+        if outcome is not None and not isinstance(outcome, Returned):
+            refused = isinstance(outcome, Refused)
+            detail = outcome.reason if isinstance(outcome, Refused) else f"{outcome.fault}: {outcome.detail}"
+            report.refused += refused
+            report.failed += not refused
+            report.errors.append(f"{row.key}: {detail}")
+            out += [FeatureRow(key=row.key, group=group.name, feature=f.name,
+                               status="refused" if refused else "failed", detail=detail) for f in group.features]
             continue
-        refused = isinstance(outcome, Refused)
-        detail = outcome.reason if isinstance(outcome, Refused) else f"{outcome.fault}: {outcome.detail}"
-        report.refused += refused
-        report.failed += not refused
-        report.errors.append(f"{row.key}: {detail}")
-        out += [FeatureRow(key=row.key, group=group.name, feature=f.name,
-                           status="refused" if refused else "failed", detail=detail,
-                           spec_hash=digest, sha256=row.sha256)
-                for f in group.features]
-    if not dry_run:
-        write_group(project, group.name, out)
-
-
-def _rows_from_value(
-    group: Group, row: IndexRow, value: BaseModel, applies: dict[str, bool], report: GroupReport
-) -> list[FeatureRow]:
-    data = value.model_dump(mode="json")
-    digest = group.spec_hash()
-    rows = []
-    for instance in group.instances:
-        if not applies[instance.id]:
-            rows += _not_applicable(group, instance, row)
-            continue
-        for feature in instance.features:
-            answer = data[feature.name]
-            evidence = None
-            if group.evidence:
-                answer, evidence = answer["value"], answer["evidence"]
-            status = "ok"
-            if feature.per == "chunk" and len(answer) != row.n_chunks:
-                status = "invalid_length"
-                report.invalid += 1
-            rows.append(FeatureRow(key=row.key, group=group.name, feature=feature.name, value=answer,
-                                   evidence=evidence, status=status, spec_hash=digest, sha256=row.sha256))
-    return rows
+        data = outcome.value.model_dump(mode="json") if outcome is not None else {}
+        report.ok += outcome is not None
+        for instance in group.instances:
+            if outcome is None or not applies[row.key][instance.id]:
+                out += _not_applicable(group, instance, row.key)
+                continue
+            for feature in instance.features:
+                answer, evidence = data[feature.name], None
+                if group.evidence:
+                    answer, evidence = answer["value"], answer["evidence"]
+                status = "ok"
+                if feature.per == "chunk" and len(answer) != row.n_chunks:
+                    status = "invalid_length"
+                    report.invalid += 1
+                out.append(FeatureRow(key=row.key, group=group.name, feature=feature.name, value=answer,
+                                      evidence=evidence, status=status))
+    return out

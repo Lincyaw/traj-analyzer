@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from traj_analyzer.adapters._blocks import PLACEHOLDERS, block_text
+from traj_analyzer.files import iter_jsonl
 from traj_analyzer.schema import Role, Step, Trajectory
 
 _LOCAL_COMMAND = re.compile(
@@ -36,32 +38,27 @@ class ClaudeCodeAdapter:
         steps: list[Step] = []
         tool_names: dict[str, str] = {}
         metadata: dict[str, Any] = {"file": str(path)}
-        with path.open(encoding="utf-8") as lines:
-            for number, line in enumerate(lines, start=1):
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as error:
-                    raise ValueError(f"{path}:{number}: {error}") from error
-                kind = record["type"]
-                if kind == "ai-title":
-                    metadata["title"] = record["aiTitle"]
-                if kind not in ("user", "assistant"):
-                    continue
-                if record.get("isSidechain") and not self.include_sidechains:
-                    continue
-                if record.get("isMeta") and not self.include_meta:
-                    continue
-                for key in ("cwd", "gitBranch", "version"):
-                    metadata.setdefault(key, record.get(key))
-                message = record["message"]
-                if kind == "assistant":
-                    metadata.setdefault("model", message["model"])
-                speaker = kind
-                if kind == "user" and record.get("origin") is not None and record["origin"]["kind"] != "human":
-                    speaker = "system"
-                for step in self._steps(speaker, message["content"], record["timestamp"], tool_names):
-                    steps.append(step.model_copy(update={"index": len(steps)}))
-        user_turns = sum(1 for s in steps if s.role == "user" and s.kind == "message")
+        for record in iter_jsonl(path):
+            kind = record["type"]
+            if kind == "ai-title":
+                metadata["title"] = record["aiTitle"]
+            if kind not in ("user", "assistant"):
+                continue
+            if record.get("isSidechain") and not self.include_sidechains:
+                continue
+            if record.get("isMeta") and not self.include_meta:
+                continue
+            for key in ("cwd", "gitBranch", "version"):
+                metadata.setdefault(key, record.get(key))
+            message = record["message"]
+            if kind == "assistant":
+                metadata.setdefault("model", message["model"])
+            speaker = kind
+            if kind == "user" and record.get("origin") is not None and record["origin"]["kind"] != "human":
+                speaker = "system"
+            for step in self._steps(speaker, message["content"], record["timestamp"], tool_names):
+                steps.append(step.model_copy(update={"index": len(steps)}))
+        user_turns = sum(1 for s in steps if s.is_user_message)
         if user_turns < self.min_user_turns:
             return
         metadata["started_at"] = steps[0].timestamp
@@ -80,7 +77,7 @@ class ClaudeCodeAdapter:
                     yield Step(index=0, role=_text_role(kind, block["text"]), content=block["text"],
                                timestamp=timestamp)
                 case "image":
-                    yield Step(index=0, role=kind, content="[image]",  # type: ignore[arg-type]
+                    yield Step(index=0, role=kind, content=PLACEHOLDERS["image"],  # type: ignore[arg-type]
                                timestamp=timestamp)
                 case "thinking":
                     # Signed thinking blocks often carry an empty text; they produce no step.
@@ -95,7 +92,7 @@ class ClaudeCodeAdapter:
                 case "tool_result":
                     yield Step(index=0, role="tool", kind="tool_result",
                                name=tool_names[block["tool_use_id"]],
-                               content=_result_text(block["content"]),
+                               content=block_text(block["content"]),
                                is_error=bool(block.get("is_error")), timestamp=timestamp)
                 case "fallback":
                     yield Step(index=0, role="system",
@@ -111,20 +108,3 @@ def _text_role(speaker: str, text: str) -> Role:
     if speaker == "user" and _LOCAL_COMMAND.match(text):
         return "system"
     return speaker  # type: ignore[return-value]
-
-
-def _result_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    parts = []
-    for item in content:
-        match item["type"]:
-            case "text":
-                parts.append(item["text"])
-            case "image":
-                parts.append("[image]")
-            case "tool_reference":
-                parts.append(f"[tool_reference: {item['tool_name']}]")
-            case other:
-                raise ValueError(f"Unknown Claude Code tool result item type: {other}")
-    return "\n".join(parts)

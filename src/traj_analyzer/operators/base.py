@@ -56,7 +56,6 @@ class Operator:
     A code operator computes its outputs with `compute`, which returns a value for every output name.
     An LLM operator contributes its outputs and `guidance` to the instruction of its call group.
     `requires` marks the trajectories the operator applies to; the others get empty values.
-    `rename_outputs` is false for operators whose params already name their outputs, so `as` keeps those names.
     """
 
     kind: Literal["code", "llm"]
@@ -67,7 +66,6 @@ class Operator:
     compute: Callable[[Trajectory, Any], dict[str, Any]] | None = None
     guidance: Callable[[Any], str] | None = None
     requires: Callable[[Trajectory], bool] | None = None
-    rename_outputs: bool = True
 
     def __post_init__(self) -> None:
         if (self.kind == "code") != (self.compute is not None):
@@ -77,7 +75,7 @@ class Operator:
 
 
 def has_user_messages(trajectory: Trajectory) -> bool:
-    return any(s.role == "user" and s.kind == "message" for s in trajectory.steps)
+    return any(s.is_user_message for s in trajectory.steps)
 
 
 def has_tool_calls(trajectory: Trajectory) -> bool:

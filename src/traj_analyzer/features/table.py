@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from traj_analyzer.files import iter_jsonl, write_jsonl
 from traj_analyzer.project import Project
 
 Status = Literal["ok", "refused", "failed", "invalid_length"]
@@ -19,9 +20,6 @@ class FeatureRow(BaseModel):
     status: Status = "ok"
     detail: str | None = None
     """Why a value is missing: the operator does not apply, or the call was refused or failed."""
-    spec_hash: str
-    sha256: str
-    """Content hash of the rendered trajectory the value was computed from."""
 
 
 def write_group(project: Project, group: str, rows: Iterable[FeatureRow]) -> int:
@@ -29,11 +27,7 @@ def write_group(project: Project, group: str, rows: Iterable[FeatureRow]) -> int
     new = list(rows)
     keys = {row.key for row in new}
     kept = [row for row in read_group(project, group) if row.key not in keys]
-    path = project.table_dir / f"{group}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as out:
-        for row in (*kept, *new):
-            out.write(row.model_dump_json() + "\n")
+    write_jsonl(project.table_dir / f"{group}.jsonl", (row.model_dump_json() for row in (*kept, *new)))
     return len(new)
 
 
@@ -41,5 +35,4 @@ def read_group(project: Project, group: str) -> list[FeatureRow]:
     path = project.table_dir / f"{group}.jsonl"
     if not path.is_file():
         return []
-    with path.open(encoding="utf-8") as lines:
-        return [FeatureRow.model_validate_json(line) for line in lines]
+    return [FeatureRow.model_validate(value) for value in iter_jsonl(path)]

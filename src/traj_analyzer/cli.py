@@ -4,23 +4,23 @@ import argparse
 import json
 import shutil
 import sys
+from collections import Counter
 from dataclasses import asdict
 from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import yaml
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
-from traj_analyzer.extract import extract, select_rows
+from traj_analyzer.extract import extract
 from traj_analyzer.features.spec import output_model, render_instruction
 from traj_analyzer.features.table import read_group
+from traj_analyzer.files import parse_yaml
 from traj_analyzer.ingest import ingest, load_index
-from traj_analyzer.operators.catalog import discover, instantiate, load_groups
-from traj_analyzer.project import CONFIG_FILE, Config, ConfigError, OperatorUse, Project
-from traj_analyzer.sampling import diverse, enrich, load_sampler, sample, save
+from traj_analyzer.operators.catalog import discover, load_groups
+from traj_analyzer.project import CONFIG_FILE, Config, ConfigError, Project
+from traj_analyzer.sampling import SamplerSpec, StrategySpec, enrich, load_sampler, sample, save
 from traj_analyzer.vectorize import Frame, build_frame
 
 DESCRIPTION = """\
@@ -65,7 +65,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
     for group in load_groups(project):
         entry: dict[str, Any] = {
             "group": group.name, "kind": group.kind, "operators": [i.id for i in group.instances],
-            "features": [f.name for f in group.features], "spec_hash": group.spec_hash(),
+            "features": [f.name for f in group.features],
         }
         if not group.is_code:
             entry["output_schema"] = output_model(group).model_json_schema()
@@ -145,22 +145,17 @@ def _edit_operators(project: Project, change: Any) -> list[dict[str, Any]]:
 def cmd_operators_enable(args: argparse.Namespace) -> None:
     project = Project.find()
     entry: dict[str, Any] = {"use": args.name}
-    if args.alias:
-        entry["as"] = args.alias
-    if args.call:
-        entry["call"] = args.call
+    for option, value in (("as", args.alias), ("prefix", args.prefix), ("call", args.call)):
+        if value:
+            entry[option] = value
     params = {}
     for item in args.param or []:
         key, sep, value = item.partition("=")
         if not sep:
             raise ConfigError(f"--param must be key=value: {item}")
-        params[key] = yaml.safe_load(value)
+        params[key] = parse_yaml(value)
     if params:
         entry["params"] = params
-    refs = discover(project)
-    if args.name not in refs:
-        raise ConfigError(f"Unknown operator {args.name}")
-    instantiate(refs[args.name], OperatorUse.model_validate(entry))
     _emit({"operators": _edit_operators(project, lambda ops: ops.append(entry))})
 
 
@@ -182,27 +177,21 @@ def _frame(project: Project, datasets: list[str] | None, groups: list[str] | Non
 
 
 def cmd_discover(args: argparse.Namespace) -> None:
+    """Sample with one strategy over the features of code groups, which are cheap to extract for everything."""
     project = Project.find()
-    rows = select_rows(project, args.dataset, None, None)
-    if args.method == "random":
-        order = [int(i) for i in np.random.default_rng(args.seed).permutation(len(rows))]
-        chosen = [(rows[i], {}) for i in order[: args.n]]
-    else:
-        groups = args.group or [g.name for g in load_groups(project) if g.is_code]
-        frame = _frame(project, args.dataset, groups)
-        if not frame.columns:
-            raise ConfigError(f"Groups {groups} have no extracted values; run `traj extract` for them first")
-        frame = frame.complete(list(frame.columns))
-        x = frame.matrix(dict.fromkeys(frame.columns, 1.0))
-        position = {row.key: row for row in rows}
-        keys = list(frame.query.index)
-        picks = diverse("discover", args.n, list(range(len(keys))), keys, x, args.seed,
-                        population=list(range(len(keys))))
-        chosen = [(position[p.key], p.reason) for p in picks]
-    _emit({"method": args.method, "population": len(rows), "trajectories": [
-        {"key": r.key, "markdown": str(project.dataset_dir(r.dataset) / r.markdown),
-         "n_steps": r.n_steps, "chars": r.chars, "reason": reason, "metadata": r.metadata}
-        for r, reason in chosen
+    groups = args.group or [g.name for g in load_groups(project) if g.is_code]
+    frame = _frame(project, args.dataset, groups)
+    if not frame.columns:
+        raise ConfigError(f"Groups {groups} have no extracted values; run `traj extract` for them first")
+    spec = SamplerSpec(name="discover", budget=args.n, seed=args.seed, datasets=args.dataset,
+                       strategies=[StrategySpec(kind=args.method, quota="rest")])
+    result = sample(spec, frame, load_groups(project, groups))
+    rows = {row.key: row for row in load_index(project, args.dataset)}
+    _emit({"method": args.method, "population": result.population, "trajectories": [
+        {"key": pick.key, "markdown": str(project.trajectory_path(pick.key, ".md")),
+         "n_steps": rows[pick.key].n_steps, "chars": rows[pick.key].chars, "reason": pick.reason,
+         "metadata": rows[pick.key].metadata}
+        for pick in result.picks
     ]})
 
 
@@ -247,8 +236,7 @@ def cmd_sample(args: argparse.Namespace) -> None:
 
 def cmd_show(args: argparse.Namespace) -> None:
     project = Project.find()
-    dataset, _, tid = args.key.partition("/")
-    path = project.dataset_dir(dataset) / f"{tid}.md"
+    path = project.trajectory_path(args.key, ".md")
     if not path.is_file():
         raise ConfigError(f"No trajectory {args.key}")
     if args.cat:
@@ -263,24 +251,23 @@ def cmd_show(args: argparse.Namespace) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
+    """Trajectories per dataset, and per group how many trajectories have rows in the feature table, by status.
+
+    The table holds what the last `traj extract` wrote; after changing data or operators, run it again.
+    """
     project = Project.find()
     index = load_index(project)
-    shas = {row.key: row.sha256 for row in index}
-    datasets: dict[str, int] = {}
-    for row in index:
-        datasets[row.dataset] = datasets.get(row.dataset, 0) + 1
+    keys = {row.key for row in index}
     groups = {}
     for group in load_groups(project):
-        digest = group.spec_hash()
-        stored = read_group(project, group.name)
-        fresh = [r for r in stored if r.spec_hash == digest and shas.get(r.key) == r.sha256]
-        current = {r.key for r in fresh if r.status == "ok"}
-        problems = {r.key for r in fresh if r.status != "ok"}
-        stale = {r.key for r in stored if r.key in shas} - current - problems
-        groups[group.name] = {"operators": [i.id for i in group.instances], "ok": len(current),
-                              "not_ok": len(problems), "stale": len(stale),
-                              "missing": len(shas) - len(current | problems | stale)}
-    _emit({"project": str(project.root), "datasets": datasets, "groups": groups})
+        statuses: dict[str, str] = {}
+        for row in read_group(project, group.name):
+            if row.key in keys and statuses.get(row.key, "ok") == "ok":
+                statuses[row.key] = row.status
+        groups[group.name] = {"operators": [i.id for i in group.instances], "extracted": len(statuses),
+                              "missing": len(keys) - len(statuses), **Counter(statuses.values())}
+    _emit({"project": str(project.root), "datasets": dict(Counter(row.dataset for row in index)),
+           "groups": groups})
 
 
 def parser() -> argparse.ArgumentParser:
@@ -312,7 +299,8 @@ def parser() -> argparse.ArgumentParser:
     q.set_defaults(fn=cmd_operators_show)
     q = ops.add_parser("enable", help="add an operator to traj.yaml")
     q.add_argument("name")
-    q.add_argument("--as", dest="alias")
+    q.add_argument("--as", dest="alias", help="instance name, needed to enable one operator twice")
+    q.add_argument("--prefix", help="prepended as <prefix>_ to every feature name")
     q.add_argument("--call", help="call group for llm operators")
     q.add_argument("--param", action="append", help="key=value, value parsed as YAML")
     q.set_defaults(fn=cmd_operators_enable)

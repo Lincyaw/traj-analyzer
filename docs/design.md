@@ -124,11 +124,20 @@ Anthropic 块中的 `tool_result` 转换为 role 为 `tool` 的步骤，即使�
 分片在步与步之间切分，每片不超过 `render.chunk_chars` 个字符，片头写入 `<!-- chunk 3 -->` 标记。
 单个步骤超过上限时独占一片。
 
-Markdown 开头的 JSON 块列出 trajectory 的元数据。
+Markdown 开头依次是数据集说明和元数据 JSON 块。
+数据集说明来自 `datasets.<name>.description`，用来告诉 llm 算子这批 trajectory 是什么、有哪些约定和已知缺陷。
 `render.hide_metadata` 中列出的键不写入 Markdown，llm 算子因此看不到这些信息，例如模型名和评测结果；这些键仍然保存在 `<id>.json` 中，code 算子可以读取。
 列表项可以是键名，也可以是 `eval_*` 这样的通配模式。
 
+每条 trajectory 有两个文件，用途不同：
+
+| 文件 | 读者 | 内容 |
+|---|---|---|
+| `<id>.json` | code 算子 | 完整的 Trajectory，步骤内容不截断，元数据完整 |
+| `<id>.md` | llm 算子和人 | 带步号、分片标记和数据集说明的可读文本，长步骤被截断，隐藏的元数据不出现 |
+
 项目算子文件可以从算子根目录导入以下划线开头的共享模块，例如 `from rca._parse import calls`，因为加载项目算子时会把项目的 `operators/` 目录加入 `sys.path`。
+项目适配器和项目算子都通过同一个加载函数导入。
 
 ## 5. 算子
 
@@ -148,7 +157,6 @@ Markdown 开头的 JSON 块列出 trajectory 的元数据。
 | `guidance(params)` | 只用于 llm 算子，返回写入 instruction 的判断标准 |
 | `requires(trajectory)` | 判断算子是否适用于这条 trajectory，不适用时特征值为空 |
 | `tags` | 场景标签，例如 `chat`、`agent`，用于筛选算子库 |
-| `rename_outputs` | 缺省为 true；为 false 时，启用时的 `as` 只改实例名，不改特征名，用于特征名本身由参数决定的算子 |
 
 下面是一个 llm 算子文件：
 
@@ -221,6 +229,7 @@ operators:
     params: {high: 0.6}
   - use: collab.user_frustration
     as: strict
+    prefix: strict
     call: strict
     params: {high: 0.3}
 
@@ -232,15 +241,14 @@ calls:
 | 字段 | 含义 |
 |---|---|
 | `use` | 算子名 |
-| `as` | 实例名；算子只有一个输出时，特征名改为该实例名，有多个输出时，特征名改为 `<实例名>_<输出名>` |
+| `as` | 实例名，缺省为算子名；同一个算子启用多次时用来区分实例 |
+| `prefix` | 给该实例的每个特征名加上 `<prefix>_` 前缀，避免同一个算子启用多次时特征重名 |
 | `call` | 只用于 llm 算子，指定调用组，缺省为 `default` |
 | `params` | 覆盖算子参数的默认值 |
 
-`calls` 为调用组设置 `model`、`evidence` 和 `guidance`。
+`calls` 为调用组设置 `model` 和 `evidence`。
 `model` 覆盖 `engine.model`，`evidence` 为 true 时每个特征附带一段引用步号的判断依据，缺省为 true。
-`guidance` 是组内所有算子共用的背景说明，例如数据的已知缺陷，在 instruction 开头只出现一次。
 
-同一个算子可以用不同的 `as` 和参数启用多次。
 特征名在整个项目内唯一，因为它们会成为宽表的列名，重名时配置校验报错。
 
 ### 5.4 执行组
@@ -253,10 +261,6 @@ calls:
 | llm 执行组 | 同一个 `call` 的全部 llm 算子实例 | `call` 的值 |
 
 一个 llm 执行组对应一个 aifn `AiFunction`，每条 trajectory 只调用一次，模型一次输出组内所有特征。
-修改组内某个算子的代码、参数或实例名时，只有这个执行组需要重新计算。
-
-执行组的 `spec_hash` 由组内每个实例的算子名、源码哈希、实例名和参数，以及调用组的 `model` 和 `evidence` 计算。
-源码哈希覆盖算子文件，以及同一算子根目录下所有以下划线开头的共享文件。
 
 ### 5.5 特征类型
 
@@ -277,28 +281,30 @@ code 算子返回的值按同样的类型校验，校验失败时提取报错终
 1. `pydantic.create_model` 把执行组的全部特征转换成 Pydantic 输出模型，`range`、`labels`、元素互不相同和概率总和都成为校验规则。
    agent 提交的结果不合法时，aifn 把字段路径和错误信息反馈给 agent，由 agent 修正后重新提交。
 2. 执行组渲染成 `.traj/instructions/<group>.md`，内容包括任务说明、文件结构、每个算子的说明和 guidance、每个特征的定义和取值约束、依据的写法。
-3. 请求内容是 `{trajectory_file, n_chunks, sha256}`。
+3. 请求内容是 `{trajectory_file, n_chunks, sha256, model}`，`sha256` 是 Markdown 文件的内容哈希。
    workspace 是该数据集的渲染目录，权限为只读。
-4. aifn 的 mailbox 对函数名、输入、instruction 和 workspace 都相同的请求直接复用已有结论。
-   请求中包含渲染文件的内容哈希，instruction 由算子生成，所以数据或算子变化时会重新计算，其余部分直接使用缓存。
+4. aifn 的 mailbox 对函数名、请求、instruction 和 workspace 都相同的调用直接复用已有结论。
+   instruction 由算子和参数生成，请求带有文件内容哈希和模型名，所以修改算子、重新读入改变了 Markdown、或者更换模型时都会重新调用，其余情况直接使用缓存。
+   提交前把 mailbox 中已有的调用读一遍建成索引，之后每条请求只查索引。
 
 ### 5.7 提取调度
 
 `traj extract` 按以下步骤执行：
 
 1. 存在 llm 执行组时，检查 `engine.env_passthrough` 中的环境变量是否都已设置，缺少时报错终止。
-2. 对每个 code 执行组，逐条 trajectory 调用 `requires` 和 `compute`。
-3. 对每个 llm 执行组，逐条 trajectory 判断组内每个实例是否适用。
-   没有适用实例的 trajectory 不调用模型，其余 trajectory 各提交一个任务，已有结论的任务直接复用。
+2. 逐条读取 trajectory 的 JSON，每条只读一次：计算全部 code 执行组，并判断每个 llm 执行组中每个实例是否适用。
+   code 算子的值按特征类型校验，每个特征只构建一次校验器。
+3. 对每个 llm 执行组，没有适用实例的 trajectory 不调用模型，其余 trajectory 各提交一个任务，已有结论的任务直接复用。
 4. 存在未完成的任务时，启动 `extract.workers` 个 `python -m aifn worker traj_analyzer.runtime:make_worker --once` 子进程。
    worker 通过环境变量 `TRAJ_PROJECT` 找到项目，并由同一份配置构建相同的函数表。
    队列清空后 worker 退出，任何 worker 以非零状态码退出时命令报错终止。
-5. 读取全部结论，写入 `.traj/features/<group>.jsonl`，每行是 `{key, group, feature, value, evidence, status, detail, spec_hash, sha256}`。
-   `sha256` 是计算时渲染文件的内容哈希。
+5. 读取全部结论，写入 `.traj/features/<group>.jsonl`，每行是 `{key, group, feature, value, evidence, status, detail}`。
    算子不适用时 `value` 为空，`detail` 为 `not applicable`。
    拒答写为 `refused`，执行失败写为 `failed`，逐片向量长度与分片数不一致写为 `invalid_length`。
 
-`--dry-run` 只查询缓存，不向 mailbox 写入任务。
+特征表始终保存最近一次 `traj extract` 写入的结果，本次运行覆盖的 trajectory 的行被替换，其余行保留。
+修改算子或配置、重新读入数据之后，再运行一次 `traj extract` 即可刷新：code 执行组每次都重新计算，代价很小；llm 执行组只对变化的部分调用模型。
+`traj extract --dry-run` 只查询缓存，不写入任务也不改特征表，其中 llm 执行组的 `pending` 就是需要调用模型的数量。
 worker 每次运行都会处理 mailbox 中全部未完成的任务，包括之前中断的运行留下的任务。
 
 ### 5.8 模型配置
@@ -333,8 +339,8 @@ worker 每次运行都会处理 mailbox 中全部未完成的任务，包括之�
 
 ### 5.9 特征发现
 
-`traj discover` 默认在全部 code 执行组的特征上做 KMeans 聚类，从每个簇中取离中心最近的 trajectory，并输出渲染文件路径和所在簇的大小。
-`--group` 指定参与聚类的执行组，`--method random` 改为随机抽取。
+`traj discover` 是只有一个策略的采样：默认在全部 code 执行组的特征上做多样性采样，从每个簇中取离中心最近的 trajectory，并输出渲染文件路径和所在簇的大小。
+`--group` 指定参与采样的执行组，`--method random` 改为随机抽取，两种方式都要求这些执行组已经提取过。
 `traj-discover` skill 指导 Claude Code 按以下顺序工作：
 
 1. 阅读样本，记录 trajectory 之间的差异。
@@ -354,13 +360,14 @@ worker 每次运行都会处理 mailbox 中全部未完成的任务，包括之�
 | type | 查询列，用于条件筛选 | 距离列，用于聚类和离群检测 |
 |---|---|---|
 | scalar、boolean | `name` | `name` |
-| category | `name`，字符串 | 每个标签一列 one-hot；没有 `labels` 时取出现次数最多的 100 个值 |
+| category | `name`，字符串 | 每个标签一列 one-hot |
 | set | 每个标签一列 multi-hot，以及 `name__count` | 每个标签一列 multi-hot |
 | vector | `name__max`、`__min`、`__mean`、`__first`、`__last` | 重采样到 `sampling.vector_length` 个点，加上五个聚合列 |
 | distribution | 每个标签一列概率 | 同左 |
 
-只有状态为 `ok`、`spec_hash` 与当前执行组一致、`sha256` 与当前渲染文件一致的特征值进入宽表。
-`traj status` 按同样的条件统计每个执行组：`ok` 和 `not_ok` 是按当前定义和当前内容计算的结果，`stale` 是定义或内容变化后需要重算的数量，`missing` 是从未计算的数量。
+没有 `labels` 的 category 和 set 特征取出现次数最多的 100 个值作为列。
+宽表读取特征表中当前启用的特征，只取状态为 `ok` 的值；其他状态的行在宽表中是空值。
+`traj status` 按执行组统计特征表：有行的 trajectory 数 `extracted`、没有行的 trajectory 数 `missing`，以及按状态分类的数量。
 距离列先做标准化，缺失值填为该列均值。
 每个特征的权重除以其列数的平方根，使列数多的特征不会主导距离。
 
@@ -387,7 +394,7 @@ strategies:
 ```
 
 `features` 可以是 `all`、特征名列表，或者特征名到权重的映射。
-`population` 默认为 `complete`，只在所有采样特征都已按当前定义和当前内容计算的 trajectory 中采样；值为空的特征，例如算子不适用或没有工具结果时的 `tool_error_rate`，也算作已计算。
+`population` 默认为 `complete`，只在每个采样特征都在特征表中有行的 trajectory 中采样；值为空的行也算，例如算子不适用、没有工具结果时的 `tool_error_rate`，以及大模型拒答或调用失败。
 `population: all` 在全部 trajectory 中采样。
 `quota` 可以是 0 到 1 之间的比例、整数或 `rest`。
 策略按列表顺序执行，已入选的 trajectory 不会再次入选。
@@ -408,7 +415,7 @@ strategies:
 
 `traj-report` skill 指导 Claude Code 按以下步骤工作：
 
-1. 运行 `traj status`，确认采样用到的执行组都已按当前定义完成提取。
+1. 运行 `traj extract` 刷新采样用到的执行组，再用 `traj status` 确认它们没有 `missing`。
 2. 运行 `traj table --format describe` 查看整体分布。
 3. 运行 `traj sample`，得到入选列表和入选原因。
 4. 阅读入选的渲染文件，核对特征值是否正确。
@@ -423,7 +430,7 @@ strategies:
 | `traj ingest [dataset...]` | 读入原始数据，写出统一格式和渲染文件 |
 | `traj operators list [--tag t] [--kind code\|llm]` | 列出内置算子库和项目中的算子，以及各自的启用情况 |
 | `traj operators show <name>` | 输出算子的参数、默认值、输出、guidance 和文件路径 |
-| `traj operators enable <name> [--as a] [--call c] [--param k=v...]` | 在 `traj.yaml` 中启用算子，保留文件中的注释和格式 |
+| `traj operators enable <name> [--as a] [--prefix p] [--call c] [--param k=v...]` | 在 `traj.yaml` 中启用算子，保留文件中的注释和格式 |
 | `traj operators disable <name>` | 从 `traj.yaml` 中移除算子名或实例名等于 `<name>` 的条目 |
 | `traj validate [--instructions]` | 校验配置、全部执行组和采样策略，输出生成的输出 schema |
 | `traj discover [--n 20] [--method diversity\|random] [--group g...]` | 挑选用于特征发现的样本 |

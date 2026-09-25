@@ -12,8 +12,8 @@ from traj_analyzer.operators.base import FeatureSpec
 from traj_analyzer.operators.catalog import Group
 from traj_analyzer.project import ConfigError, Project
 
-MAX_FREE_LABELS = 30
-MAX_FREE_CATEGORIES = 100
+MAX_FREE_LABELS = 100
+"""Columns for category and set features without labels: one per value, for the most frequent values."""
 
 
 @dataclass
@@ -30,9 +30,10 @@ class Frame:
     extracted: dict[str, set[str]] = field(default_factory=dict)
 
     def complete(self, features: list[str]) -> Frame:
-        """Keep the trajectories extracted under the current definition of every one of `features`.
+        """Keep the trajectories that have a row for every one of `features` in the feature table.
 
-        A feature whose value is empty for a trajectory, such as a tool error rate without tool results, still counts.
+        A row counts even when its value is empty: the operator did not apply, the value was None, or the LLM call
+        was refused or failed.
         """
         unknown = sorted(set(features) - set(self.columns))
         if unknown:
@@ -75,27 +76,29 @@ def ident(label: str) -> str:
 def build_frame(
     project: Project, groups: list[Group], trajectories: list[IndexRow], vector_length: int
 ) -> Frame:
-    """Use only values computed under the current feature definition from the current trajectory content."""
+    """Read the feature table as the last `traj extract` left it, for the given trajectories and enabled features."""
     query: dict[str, pd.Series] = {}
     distance: dict[str, pd.Series] = {}
     columns: dict[str, list[str]] = {}
     extracted: dict[str, set[str]] = {}
-    shas = {t.key: t.sha256 for t in trajectories}
-    index = pd.Index(list(shas), name="key")
+    index = pd.Index([t.key for t in trajectories], name="key")
+    wanted = set(index)
     for group in groups:
-        digest = group.spec_hash()
         values: dict[str, dict[str, object]] = {f.name: {} for f in group.features}
+        present: dict[str, set[str]] = {f.name: set() for f in group.features}
         for row in read_group(project, group.name):
-            if row.status == "ok" and row.spec_hash == digest and shas.get(row.key) == row.sha256:
-                values[row.feature][row.key] = row.value
+            if row.key in wanted and row.feature in values:
+                present[row.feature].add(row.key)
+                if row.status == "ok":
+                    values[row.feature][row.key] = row.value
         for feature in group.features:
-            if not values[feature.name]:
+            if not present[feature.name]:
                 continue
             q, d = _expand(feature, values[feature.name], index, vector_length)
             query.update(q)
             distance.update(d)
             columns[feature.name] = list(d)
-            extracted[feature.name] = set(values[feature.name])
+            extracted[feature.name] = present[feature.name]
     return Frame(
         query=pd.DataFrame(query, index=index),
         distance=pd.DataFrame(distance, index=index),
@@ -118,7 +121,7 @@ def _expand(
             onehot = {f"{name}__{ident(lb)}": (series == lb).astype(float).where(series.notna()) for lb in labels}
             return {name: series.astype("string")}, onehot
         case "set":
-            labels = list(feature.labels or ()) or _top_labels(series)
+            labels = list(feature.labels or ()) or _top_values(series)
             multihot = {
                 f"{name}__{ident(lb)}": series.map(
                     lambda v, lb=lb: float(lb in v) if isinstance(v, list) else None)
@@ -164,14 +167,6 @@ def _resample(values: list[float], length: int) -> list[float]:
 
 
 def _top_values(series: pd.Series) -> list[str]:
-    counts = series.dropna().value_counts()
-    return [str(v) for v in counts.index[:MAX_FREE_CATEGORIES]]
-
-
-def _top_labels(series: pd.Series) -> list[str]:
-    counts: dict[str, int] = {}
-    for items in series:
-        if isinstance(items, list):
-            for item in items:
-                counts[item] = counts.get(item, 0) + 1
-    return sorted(counts, key=lambda k: -counts[k])[:MAX_FREE_LABELS]
+    """Most frequent values of a category column, or of the items of a set column."""
+    counts = series.explode().dropna().value_counts()
+    return [str(v) for v in counts.index[:MAX_FREE_LABELS]]

@@ -13,8 +13,9 @@ from sklearn.cluster import KMeans
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import NearestNeighbors
 
+from traj_analyzer.files import read_yaml
 from traj_analyzer.operators.catalog import Group
-from traj_analyzer.project import ConfigError, Project, read_yaml
+from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.vectorize import Frame
 
 
@@ -38,7 +39,7 @@ class SamplerSpec(BaseModel):
     datasets: list[str] | None = None
     features: Literal["all"] | list[str] | dict[str, float] = "all"
     population: Literal["complete", "all"] = "complete"
-    """`complete` samples only trajectories with values for every sampler feature."""
+    """`complete` samples only trajectories with a feature-table row for every sampler feature."""
     strategies: list[StrategySpec] = Field(min_length=1)
 
 
@@ -238,12 +239,9 @@ def _plain(value: Any) -> Any:
 
 
 def enrich(project: Project, pick: Pick, frame: Frame) -> dict[str, Any]:
-    dataset, _, tid = pick.key.partition("/")
     row = frame.query.loc[pick.key]
     features = {c: _plain(v) for c, v in row.items() if not pd.isna(v)}
-    return {**pick.model_dump(),
-            "markdown": str(project.dataset_dir(dataset) / f"{tid}.md"),
-            "features": features}
+    return {**pick.model_dump(), "markdown": str(project.trajectory_path(pick.key, ".md")), "features": features}
 
 
 def save(project: Project, spec: SamplerSpec, selection: dict[str, Any]) -> Path:

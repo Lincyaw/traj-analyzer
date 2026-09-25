@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field
+
+from traj_analyzer.files import read_yaml
 
 CONFIG_FILE = "traj.yaml"
 
@@ -23,6 +24,8 @@ class DatasetConfig(_Strict):
     input: list[str]
     exclude: list[str] = Field(default_factory=list)
     options: dict[str, Any] = Field(default_factory=dict)
+    description: str = ""
+    """What the trajectories are and how to read them; rendered at the top of every Markdown file."""
 
 
 class RenderConfig(_Strict):
@@ -33,7 +36,6 @@ class RenderConfig(_Strict):
 
 
 class EngineConfig(_Strict):
-    kind: Literal["deepseek"] = "deepseek"
     dsh_home: str = "~/.dsh"
     model: str = "deepseek-v4-flash"
     provider: str = "deepseek-official"
@@ -58,6 +60,9 @@ class OperatorUse(_Strict):
 
     use: str
     alias: str | None = Field(default=None, alias="as")
+    """Instance name; defaults to the operator name."""
+    prefix: str | None = None
+    """Prepended as `<prefix>_` to every feature name, to enable one operator several times."""
     call: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
 
@@ -65,8 +70,6 @@ class OperatorUse(_Strict):
 class CallConfig(_Strict):
     model: str | None = None
     evidence: bool = True
-    guidance: str = ""
-    """Context shared by every operator of the call, written once at the top of its instruction."""
 
 
 class Config(_Strict):
@@ -78,10 +81,6 @@ class Config(_Strict):
     engine: EngineConfig = Field(default_factory=EngineConfig)
     extract: ExtractConfig = Field(default_factory=ExtractConfig)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
-
-
-def read_yaml(path: Path) -> Any:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 class Project:
@@ -112,6 +111,11 @@ class Project:
 
     def dataset_dir(self, dataset: str) -> Path:
         return self.data_dir / "datasets" / dataset
+
+    def trajectory_path(self, key: str, suffix: Literal[".json", ".md"]) -> Path:
+        """File of one trajectory, `<dataset>/<id>` → `.traj/datasets/<dataset>/<id><suffix>`."""
+        dataset, _, tid = key.partition("/")
+        return self.dataset_dir(dataset) / f"{tid}{suffix}"
 
     @property
     def operators_dir(self) -> Path:

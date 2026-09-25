@@ -10,6 +10,8 @@ datasets:
       include_thinking: false
       include_sidechains: false
       min_user_turns: 1
+    # Written at the top of every rendered trajectory, so LLM operators know what they are reading.
+    description: A Claude Code session between a developer and the coding agent.
 
 # Enabled operators; `traj operators list` shows the built-in library and the project's operators/ directory.
 # LLM operators with the same `call` share one LLM call per trajectory.
@@ -34,7 +36,6 @@ render:
   chunk_chars: 24000
 
 engine:
-  kind: deepseek
   dsh_home: ~/.dsh
   model: deepseek-v4-flash
   provider: deepseek-official

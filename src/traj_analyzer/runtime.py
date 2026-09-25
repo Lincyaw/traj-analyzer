@@ -12,7 +12,15 @@ from traj_analyzer.operators.catalog import Group, load_groups
 from traj_analyzer.project import ConfigError, Project
 
 
-def build_function(project: Project, group: Group) -> AiFunction[Any, Any]:
+def model_name(project: Project, group: Group) -> str:
+    return group.model or project.config.engine.model
+
+
+def build_function(project: Project, group: Group, instruction: Path | None = None) -> AiFunction[Any, Any]:
+    """Declare the group's aifn function; the submitting side passes the instruction file it wrote.
+
+    Workers need no instruction file, because each call carries a copy of its instruction text.
+    """
     engine = project.config.engine
     extract = project.config.extract
     return AiFunction(
@@ -20,13 +28,17 @@ def build_function(project: Project, group: Group) -> AiFunction[Any, Any]:
         request=ExtractRequest,
         returns=output_model(group),
         model=Model(
-            name=group.model or engine.model, provider=engine.provider,
+            name=model_name(project, group), provider=engine.provider,
             max_tokens=engine.max_tokens, reasoning_effort=engine.reasoning_effort,
         ),
-        instruction=write_instruction(project, group),
+        instruction=instruction,
         timeout_s=extract.timeout_s,
         attempts=extract.attempts,
     )
+
+
+def submitting_function(project: Project, group: Group) -> AiFunction[Any, Any]:
+    return build_function(project, group, write_instruction(project, group))
 
 
 def mailbox(project: Project) -> Mailbox:

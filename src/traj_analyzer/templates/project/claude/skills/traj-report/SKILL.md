@@ -7,9 +7,8 @@ description: Sample trajectories in this traj-analyzer project, read them, and w
 
 ## Steps
 
-1. Run `traj status`.
-   Every group whose features the sampler uses must have `stale`, `not_ok` and `missing` at 0.
-   Run `traj extract` for any group that does not.
+1. Run `traj extract` for the groups whose features the sampler uses; it refreshes them after any change to data or operators, and calls the model only for what changed.
+   Then run `traj status` and check that those groups have no `missing` trajectories.
 2. Run `traj table --format describe` to see distributions, label counts and missing values over the whole population.
 3. Run `traj sample --sampler <name>`, where the default name is `default`.
    Each pick carries `strategy`, `reason` and the full set of feature columns.

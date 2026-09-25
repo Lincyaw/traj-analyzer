@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
-import yaml
 from aifn import Worker
 from aifn.engines import ReplayEngine
 from pydantic import ValidationError
+from ruamel.yaml import YAML
 
 from traj_analyzer.adapters.claude_code import ClaudeCodeAdapter
 from traj_analyzer.adapters.messages import MessagesAdapter
@@ -39,6 +41,7 @@ TOUCAN = {
         "tool_call_format": "python_literal",
     },
 }
+ULTRACHAT_DESCRIPTION = "Multi-turn chats from the public UltraChat dataset."
 ULTRACHAT = {
     "adapter": "messages",
     "input": [str(DATA / "ultrachat.jsonl")],
@@ -120,15 +123,24 @@ def test_library_operators_load_and_render() -> None:
         assert outputs or name == "meta.fields"
 
 
+def edit_config(root: Path, change: Callable[[dict[str, Any]], None]) -> None:
+    editor = YAML(typ="safe")
+    config = editor.load(root / "traj.yaml")
+    change(config)
+    editor.dump(config, root / "traj.yaml")
+
+
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
     root = tmp_path / "proj"
     assert main(["init", str(root)]) == 0
-    config = yaml.safe_load((root / "traj.yaml").read_text(encoding="utf-8"))
-    config["datasets"] = {"toucan": TOUCAN, "ultrachat": ULTRACHAT}
-    config["operators"] = OPERATORS
-    config["calls"] = {"outcome": {"evidence": True, "guidance": "Records come from public tool-use datasets."}}
-    (root / "traj.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    def configure(config: dict[str, Any]) -> None:
+        config["datasets"] = {"toucan": TOUCAN, "ultrachat": {**ULTRACHAT, "description": ULTRACHAT_DESCRIPTION}}
+        config["operators"] = OPERATORS
+        config["calls"] = {"outcome": {"evidence": True}}
+
+    edit_config(root, configure)
     shutil.copytree(DATA / "operators", root / "operators", dirs_exist_ok=True)
     monkeypatch.chdir(root)
     loaded = Project.load(root)
@@ -141,9 +153,9 @@ def test_groups_follow_enabled_operators(project: Project) -> None:
     assert set(groups) == {"stats-basic", "stats-tool_usage", "fixture-tool_share", "outcome"}
     outcome = groups["outcome"]
     assert [f.name for f in outcome.features] == ["task_type", "frustration", "curve", "time_split"]
-    instruction = render_instruction(outcome)
-    assert "### Operator `fixture.outcome`" in instruction
-    assert instruction.count("Records come from public tool-use datasets.") == 1
+    assert "### Operator `fixture.outcome`" in render_instruction(outcome)
+    ultrachat = load_index(project, ["ultrachat"])[0].key
+    assert ULTRACHAT_DESCRIPTION in project.trajectory_path(ultrachat, ".md").read_text(encoding="utf-8")
     model = output_model(outcome)
     answer = {
         "task_type": {"value": "lookup", "evidence": "#1"},
@@ -279,18 +291,20 @@ def test_cli_operators_enable_and_disable(project: Project, capsys: pytest.Captu
     assert main(["operators", "enable", "fixture.tool_share"]) == 2
     assert (project.root / "traj.yaml").read_text(encoding="utf-8") == before
 
-    assert main(["operators", "enable", "collab.user_frustration", "--as", "pushback", "--call", "collab",
-                 "--param", "high=0.8"]) == 0
+    assert main(["operators", "enable", "collab.user_frustration", "--call", "collab", "--param", "high=0.8"]) == 0
+    assert main(["operators", "enable", "collab.user_frustration", "--as", "strict", "--call", "collab"]) == 2
+    assert main(["operators", "enable", "collab.user_frustration", "--as", "strict", "--prefix", "strict",
+                 "--call", "collab", "--param", "high=0.3"]) == 0
     capsys.readouterr()
-    reloaded = Project.load(project.root)
-    groups = {g.name: g for g in load_groups(reloaded)}
-    assert [f.name for f in groups["collab"].features] == ["pushback_user_frustration", "pushback_frustration_curve"]
-    assert groups["collab"].features[0].thresholds == {"high": 0.8}
-    assert expand_where("pushback_user_frustration >= {pushback_user_frustration.high}",
-                        {f.name: f.thresholds for f in groups["collab"].features}) == \
-        "pushback_user_frustration >= 0.8"
+    groups = {g.name: g for g in load_groups(Project.load(project.root))}
+    names = [f.name for f in groups["collab"].features]
+    assert names == ["user_frustration", "frustration_curve", "strict_user_frustration", "strict_frustration_curve"]
+    thresholds = {f.name: f.thresholds for f in groups["collab"].features}
+    assert expand_where("strict_user_frustration >= {strict_user_frustration.high}", thresholds) == \
+        "strict_user_frustration >= 0.3"
 
-    assert main(["operators", "disable", "pushback"]) == 0
+    assert main(["operators", "disable", "strict"]) == 0
+    assert main(["operators", "disable", "collab.user_frustration"]) == 0
     assert "collab" not in {g.name for g in load_groups(Project.load(project.root))}
 
 
@@ -326,18 +340,32 @@ def test_hidden_metadata_stays_out_of_the_markdown() -> None:
     assert '"started_at"' not in patterned and '"ended_at"' not in patterned and '"title"' in patterned
 
 
-def test_changed_content_makes_features_stale(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
-    extract(project, groups=["stats-basic"])
-    config = yaml.safe_load((project.root / "traj.yaml").read_text(encoding="utf-8"))
-    config["render"]["max_step_chars"] = 200
-    (project.root / "traj.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
-    ingest(Project.load(project.root), ["toucan"])
+def test_llm_answers_are_reused_only_for_the_same_content_and_model(project: Project, tmp_path: Path) -> None:
+    keys = _recorded_keys(project)
+    extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "replay"))
+    (same,) = extract(project, groups=["outcome"], keys=keys, dry_run=True)
+    assert (same.cached, same.pending) == (3, 0)
+
+    edit_config(project.root, lambda config: config["calls"]["outcome"].update(model="another-model"))
+    (other_model,) = extract(Project.load(project.root), groups=["outcome"], keys=keys, dry_run=True)
+    assert (other_model.cached, other_model.pending) == (0, 3)
+
+    edit_config(project.root, lambda config: config["calls"]["outcome"].pop("model"))
+    edit_config(project.root, lambda config: config["render"].update(max_step_chars=200))
+    reingested = Project.load(project.root)
+    ingest(reingested, ["toucan"])
+    (changed,) = extract(reingested, groups=["outcome"], keys=keys, dry_run=True)
+    assert (changed.cached, changed.pending) == (0, 3)
+
+
+def test_status_counts_rows_by_status(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
+    extract(project, groups=["fixture-tool_share"], datasets=["toucan"])
     capsys.readouterr()
     assert main(["status"]) == 0
-    stats = json.loads(capsys.readouterr().out)["groups"]["stats-basic"]
-    assert (stats["ok"], stats["stale"]) == (40, 30)
-    frame = build_frame(project, load_groups(project, ["stats-basic"]), load_index(project), vector_length=4)
-    assert len(frame.complete(["n_steps"]).query) == 40
+    status = json.loads(capsys.readouterr().out)
+    assert status["datasets"] == {"toucan": 30, "ultrachat": 40}
+    assert status["groups"]["fixture-tool_share"] == {"operators": ["fixture.tool_share"], "extracted": 30,
+                                                      "missing": 40, "ok": 30}
 
 
 def test_dry_run_writes_nothing(project: Project) -> None:

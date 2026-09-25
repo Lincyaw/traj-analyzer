@@ -21,7 +21,7 @@ def compute(trajectory: Trajectory, params: NoParams) -> dict[str, Any]:
     stamps = [datetime.fromisoformat(s.timestamp) for s in trajectory.steps if s.timestamp]
     return {
         "n_steps": float(len(trajectory.steps)),
-        "n_user_turns": float(sum(1 for s in trajectory.steps if s.role == "user" and s.kind == "message")),
+        "n_user_turns": float(sum(1 for s in trajectory.steps if s.is_user_message)),
         "total_chars": float(sum(len(s.content) for s in trajectory.steps)),
         "duration_minutes": (stamps[-1] - stamps[0]).total_seconds() / 60 if len(stamps) > 1 else None,
     }

@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from traj_analyzer.adapters import load_adapter
+from traj_analyzer.files import iter_jsonl, write_jsonl
 from traj_analyzer.project import ConfigError, DatasetConfig, Project, RenderConfig
 from traj_analyzer.schema import Step, Trajectory
 
@@ -22,8 +23,8 @@ class IndexRow(BaseModel):
     key: str
     dataset: str
     id: str
-    markdown: str
     sha256: str
+    """Hash of the rendered Markdown; it goes into LLM requests so a changed file is never served a stale answer."""
     n_steps: int
     n_chunks: int
     chars: int
@@ -43,18 +44,15 @@ def ingest(project: Project, datasets: list[str] | None = None) -> dict[str, int
 def _ingest_one(project: Project, name: str) -> int:
     config = project.config.datasets[name]
     adapter = load_adapter(config.adapter, config.options, project.root)
-    out = project.dataset_dir(name)
-    out.mkdir(parents=True, exist_ok=True)
+    project.dataset_dir(name).mkdir(parents=True, exist_ok=True)
     rows: dict[str, IndexRow] = {}
     for path in input_files(config, project.root):
         for trajectory in adapter.read(path, name):
             trajectory = trajectory.model_copy(update={"id": safe_id(trajectory.id)})
             if trajectory.id in rows:
                 raise ValueError(f"Duplicate trajectory id {trajectory.id} in {path}")
-            rows[trajectory.id] = _write(trajectory, out, project.config.render)
-    with (out / INDEX_FILE).open("w", encoding="utf-8") as index:
-        for row in rows.values():
-            index.write(row.model_dump_json() + "\n")
+            rows[trajectory.id] = _write(project, trajectory, config.description)
+    write_jsonl(project.dataset_dir(name) / INDEX_FILE, (row.model_dump_json() for row in rows.values()))
     return len(rows)
 
 
@@ -78,14 +76,13 @@ def safe_id(raw: str) -> str:
     return cleaned
 
 
-def _write(trajectory: Trajectory, out: Path, render: RenderConfig) -> IndexRow:
-    markdown, n_chunks = render_markdown(trajectory, render)
-    (out / f"{trajectory.id}.json").write_text(trajectory.model_dump_json(), encoding="utf-8")
-    (out / f"{trajectory.id}.md").write_text(markdown, encoding="utf-8")
+def _write(project: Project, trajectory: Trajectory, description: str) -> IndexRow:
+    markdown, n_chunks = render_markdown(trajectory, project.config.render, description)
+    project.trajectory_path(trajectory.key, ".json").write_text(trajectory.model_dump_json(), encoding="utf-8")
+    project.trajectory_path(trajectory.key, ".md").write_text(markdown, encoding="utf-8")
     scalars = {k: v for k, v in trajectory.metadata.items() if _is_scalar(v)}
     return IndexRow(
         key=trajectory.key, dataset=trajectory.dataset, id=trajectory.id,
-        markdown=f"{trajectory.id}.md",
         sha256=hashlib.sha256(markdown.encode()).hexdigest(),
         n_steps=len(trajectory.steps), n_chunks=n_chunks, chars=len(markdown), metadata=scalars,
     )
@@ -95,12 +92,14 @@ def _is_scalar(value: Any) -> bool:
     return value is None or isinstance(value, str | int | float | bool)
 
 
-def render_markdown(trajectory: Trajectory, render: RenderConfig) -> tuple[str, int]:
-    """Render one heading per step, with a `<!-- chunk k -->` marker opening every chunk.
+def render_markdown(trajectory: Trajectory, render: RenderConfig, description: str = "") -> tuple[str, int]:
+    """Render the dataset description, shown metadata, and one heading per step with chunk markers.
 
     Chunks break only between steps, so a step longer than the budget forms a chunk of its own.
     """
     header = [f"# {trajectory.key}", ""]
+    if description:
+        header += [description.strip(), ""]
     shown = {k: v for k, v in trajectory.metadata.items()
              if not any(fnmatch.fnmatchcase(k, pattern) for pattern in render.hide_metadata)}
     if shown:
@@ -139,11 +138,9 @@ def load_index(project: Project, datasets: list[str] | None = None) -> list[Inde
         path = project.dataset_dir(name) / INDEX_FILE
         if not path.is_file():
             raise ConfigError(f"Dataset {name} is not ingested; run `traj ingest {name}`")
-        with path.open(encoding="utf-8") as index:
-            rows.extend(IndexRow.model_validate_json(line) for line in index)
+        rows.extend(IndexRow.model_validate(value) for value in iter_jsonl(path))
     return rows
 
 
-def load_trajectory(project: Project, row: IndexRow) -> Trajectory:
-    path = project.dataset_dir(row.dataset) / f"{row.id}.json"
-    return Trajectory.model_validate_json(path.read_text(encoding="utf-8"))
+def load_trajectory(project: Project, key: str) -> Trajectory:
+    return Trajectory.model_validate_json(project.trajectory_path(key, ".json").read_text(encoding="utf-8"))

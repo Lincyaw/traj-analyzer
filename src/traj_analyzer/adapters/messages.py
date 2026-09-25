@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from traj_analyzer.adapters._blocks import PLACEHOLDERS, block_text
+from traj_analyzer.files import iter_jsonl
 from traj_analyzer.schema import Kind, Role, Step, Trajectory
 
 
@@ -33,9 +35,6 @@ DEFAULT_ROLES = {
 # Message keys this adapter reads besides the configured role and content keys.
 KNOWN_KEYS = {"name", "tool_calls", "tool_call_id", "tool_call_ids", "function_call", "refusal",
               "reasoning_content", "reasoning", "audio"}
-
-PLACEHOLDERS = {"image": "[image]", "image_url": "[image]", "input_image": "[image]", "input_audio": "[audio]",
-                "file": "[file]", "document": "[document]"}
 
 
 @dataclass
@@ -192,7 +191,7 @@ class MessagesAdapter:
                 parse.add("assistant", "tool_call", json.dumps(part["input"], ensure_ascii=False), name=part["name"])
             elif kind == "tool_result":
                 flush()
-                parse.add("tool", "tool_result", _block_text(part.get("content", "")),
+                parse.add("tool", "tool_result", block_text(part.get("content", "")),
                           name=parse.tool_names[part["tool_use_id"]], is_error=bool(part.get("is_error")))
             else:
                 raise ValueError(f"unknown content part type {kind!r}")
@@ -209,26 +208,9 @@ def _as_text(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
-def _block_text(content: Any) -> str:
-    """Text of an Anthropic tool_result content, which is a string or a list of text and image blocks."""
-    if isinstance(content, str):
-        return content
-    parts = []
-    for block in content:
-        if block["type"] == "text":
-            parts.append(block["text"])
-        elif block["type"] in PLACEHOLDERS:
-            parts.append(PLACEHOLDERS[block["type"]])
-        else:
-            raise ValueError(f"unknown tool_result block type {block['type']!r}")
-    return "\n".join(parts)
-
-
 def _records(path: Path) -> Iterator[dict[str, Any]]:
     if path.suffix == ".jsonl":
-        with path.open(encoding="utf-8") as lines:
-            for line in lines:
-                yield json.loads(line)
+        yield from iter_jsonl(path)
         return
     data = json.loads(path.read_text(encoding="utf-8"))
     yield from data if isinstance(data, list) else [data]

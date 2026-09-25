@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -52,10 +52,10 @@ def value_type(feature: FeatureSpec) -> Any:
     raise AssertionError(feature.type)
 
 
-def validate_value(feature: FeatureSpec, value: Any) -> Any:
-    """Check a code operator's value against its feature type; None means the feature does not apply."""
+def value_validator(feature: FeatureSpec) -> Callable[[Any], Any]:
+    """Checker for a code operator's values of this feature; None means the feature does not apply."""
     adapter: TypeAdapter[Any] = TypeAdapter(value_type(feature) | None)
-    return adapter.dump_python(adapter.validate_python(value), mode="json")
+    return lambda value: adapter.dump_python(adapter.validate_python(value), mode="json")
 
 
 def output_model(group: Group) -> type[BaseModel]:
@@ -78,9 +78,14 @@ def _camel(name: str) -> str:
 
 
 class ExtractRequest(BaseModel):
+    """Input of one LLM call; aifn reuses an earlier answer only when every field and the instruction match."""
+
     trajectory_file: str
     n_chunks: int
     sha256: str
+    """Content hash of the Markdown file, so a re-ingested trajectory is judged again."""
+    model: str
+    """Model that answers, so changing the model is not served answers of the previous one."""
 
 
 _PREAMBLE = """\
@@ -88,7 +93,8 @@ _PREAMBLE = """\
 
 `input.json` names a Markdown file, `trajectory_file`, relative to the working directory.
 The file is one LLM trajectory, such as a conversation or an agent run.
-Every step starts with a heading `### #<n> <role> · <kind>[ · <tool name>]`.
+It opens with a description of the dataset, when one is given, and a JSON block of metadata; read both first.
+Every step starts with a heading `### #<n> <role> · <kind>[ · <name>]`.
 The file has `n_chunks` chunks, each starting with a line `<!-- chunk <k> -->`, where k counts from 0.
 
 Read the whole file in parts, since it may be long.
@@ -109,10 +115,7 @@ A trajectory with little content still gets an answer that fits what is there.
 
 
 def render_instruction(group: Group) -> str:
-    parts = [_PREAMBLE]
-    if group.guidance:
-        parts.append(f"## Context\n\n{group.guidance.strip()}\n")
-    parts.append("## Features\n")
+    parts = [_PREAMBLE, "## Features\n"]
     for instance in group.instances:
         operator = instance.ref.operator
         parts.append(f"### Operator `{instance.id}`\n\n{operator.description}\n")
@@ -152,13 +155,7 @@ def _render_feature(feature: FeatureSpec) -> str:
 
 
 def write_instruction(project: Project, group: Group) -> Path:
-    """Write the instruction file atomically, since worker processes write it concurrently."""
-    text = render_instruction(group)
     path = project.instructions_dir / f"{group.name}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_file() and path.read_text(encoding="utf-8") == text:
-        return path
-    temporary = path.with_suffix(f".{os.getpid()}.tmp")
-    temporary.write_text(text, encoding="utf-8")
-    temporary.replace(path)
+    path.write_text(render_instruction(group), encoding="utf-8")
     return path

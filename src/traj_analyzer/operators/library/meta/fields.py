@@ -68,5 +68,4 @@ OPERATOR = Operator(
     params=Params,
     outputs=outputs,
     compute=compute,
-    rename_outputs=False,
 )

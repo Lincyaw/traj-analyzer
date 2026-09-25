@@ -17,6 +17,10 @@ class Step(BaseModel):
     is_error: bool = False
     timestamp: str | None = None
 
+    @property
+    def is_user_message(self) -> bool:
+        return self.role == "user" and self.kind == "message"
+
 
 class Trajectory(BaseModel):
     id: str
