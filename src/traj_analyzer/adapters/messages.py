@@ -214,3 +214,6 @@ def _records(path: Path) -> Iterator[dict[str, Any]]:
         return
     data = json.loads(path.read_text(encoding="utf-8"))
     yield from data if isinstance(data, list) else [data]
+
+
+ADAPTER = MessagesAdapter

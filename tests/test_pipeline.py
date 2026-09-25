@@ -99,7 +99,9 @@ def test_chunks_break_between_steps() -> None:
 
 def test_feature_spec_rejects_bad_shapes() -> None:
     with pytest.raises(ValidationError):
-        FeatureSpec(name="d", type="distribution", description="no labels")
+        FeatureSpec(name="b", type="boolean", labels={"x": "labels on a boolean"}, description="bad")
+    with pytest.raises(ValidationError):
+        FeatureSpec(name="s", type="set", range=(0, 1), description="range on a set")
     with pytest.raises(ValidationError):
         FeatureSpec(name="v", type="vector", description="neither per nor length")
     with pytest.raises(ValidationError):
@@ -113,14 +115,17 @@ def test_operator_kind_must_match_its_functions() -> None:
         Operator(kind="llm", description="compute", outputs=lambda p: [], compute=lambda t, p: {})
 
 
-def test_library_operators_load_and_render() -> None:
+def test_library_operators_are_atomic() -> None:
     refs = discover(None)
-    assert {"stats.basic", "stats.tool_usage", "outcome.task_type", "outcome.task_completed",
-            "collab.user_frustration", "collab.failure_modes"} <= set(refs)
+    assert {"stats.basic", "stats.tool_usage", "meta.fields", "task.request_kinds", "user.dissatisfied",
+            "user.corrects", "user.follow_up", "user.approves", "assistant.claims_done",
+            "assistant.asks_user"} == set(refs)
     for name, ref in refs.items():
         outputs = ref.operator.outputs(ref.operator.params())
         assert all(isinstance(f, FeatureSpec) for f in outputs)
         assert outputs or name == "meta.fields"
+        if ref.operator.kind == "llm":
+            assert all(f.type in ("boolean", "category", "set") for f in outputs), name
 
 
 def edit_config(root: Path, change: Callable[[dict[str, Any]], None]) -> None:
@@ -165,9 +170,14 @@ def test_groups_follow_enabled_operators(project: Project) -> None:
     }
     model.model_validate(answer)
     for name, bad in [("task_type", "nope"), ("frustration", 1.5), ("curve", []),
-                      ("time_split", {"tools": 0.9, "answer": 0.5})]:
+                      ("time_split", {"tools": 1.5}), ("time_split", {"other": 0.5})]:
         with pytest.raises(ValidationError):
             model.model_validate({**answer, name: {"value": bad, "evidence": "#1"}})
+
+
+def test_where_expands_thresholds_from_feature_definitions(project: Project) -> None:
+    thresholds = {f.name: f.thresholds for g in load_groups(project) for f in g.features}
+    assert expand_where("frustration >= {frustration.high}", thresholds) == "frustration >= 0.7"
 
 
 def test_code_operators_and_requires(project: Project) -> None:
@@ -179,13 +189,18 @@ def test_code_operators_and_requires(project: Project) -> None:
     frame = build_frame(project, groups, load_index(project), vector_length=4)
     assert frame.query["tool_share"].notna().sum() == 30
     assert len(frame.complete(["tool_share", "n_steps"]).query) == 70
+    tool_columns = frame.columns["tool_calls"]
+    assert tool_columns and all(c.startswith("tool_calls__") for c in tool_columns)
+    per_tool_total = frame.query[tool_columns].sum(axis=1)
+    toucan = [k for k in frame.query.index if k.startswith("toucan/")]
+    assert (per_tool_total[toucan] == frame.query.loc[toucan, "n_tool_calls"]).all()
 
 
 def test_sampling_over_code_features(project: Project) -> None:
     extract(project, groups=["stats-basic", "stats-tool_usage"])
     groups = load_groups(project, ["stats-basic", "stats-tool_usage"])
     frame = build_frame(project, groups, load_index(project), vector_length=5)
-    assert {"n_steps", "n_tool_calls", "tools_used__count"} <= set(frame.query.columns)
+    assert {"n_steps", "n_tool_calls", "tool_error_rate"} <= set(frame.query.columns)
 
     spec = load_sampler(project, "default").model_copy(update={"budget": 12})
     spec.strategies.insert(0, spec.strategies[0].model_copy(update={
@@ -281,31 +296,46 @@ def test_cli_operators_enable_and_disable(project: Project, capsys: pytest.Captu
     listed = {op["name"]: op for op in json.loads(capsys.readouterr().out)["operators"]}
     assert listed["fixture.outcome"]["origin"] == "project"
     assert listed["fixture.outcome"]["enabled_as"] == ["fixture.outcome"]
-    assert listed["collab.user_frustration"]["enabled_as"] == []
+    assert listed["user.corrects"]["enabled_as"] == []
 
-    assert main(["operators", "show", "collab.user_frustration"]) == 0
+    assert main(["operators", "show", "task.request_kinds"]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert shown["params_default"] == {"high": 0.5}
+    assert "fix" in shown["params_default"]["labels"]
 
     before = (project.root / "traj.yaml").read_text(encoding="utf-8")
     assert main(["operators", "enable", "fixture.tool_share"]) == 2
     assert (project.root / "traj.yaml").read_text(encoding="utf-8") == before
 
-    assert main(["operators", "enable", "collab.user_frustration", "--call", "collab", "--param", "high=0.8"]) == 0
-    assert main(["operators", "enable", "collab.user_frustration", "--as", "strict", "--call", "collab"]) == 2
-    assert main(["operators", "enable", "collab.user_frustration", "--as", "strict", "--prefix", "strict",
-                 "--call", "collab", "--param", "high=0.3"]) == 0
+    assert main(["operators", "enable", "user.corrects", "--call", "dialogue"]) == 0
+    assert main(["operators", "enable", "task.request_kinds", "--call", "dialogue",
+                 "--param", "labels={fix: Fix a bug., other: Anything else.}"]) == 0
+    assert main(["operators", "enable", "task.request_kinds", "--as", "coarse", "--call", "dialogue"]) == 2
+    assert main(["operators", "enable", "task.request_kinds", "--as", "coarse", "--prefix", "coarse",
+                 "--call", "dialogue"]) == 0
     capsys.readouterr()
     groups = {g.name: g for g in load_groups(Project.load(project.root))}
-    names = [f.name for f in groups["collab"].features]
-    assert names == ["user_frustration", "frustration_curve", "strict_user_frustration", "strict_frustration_curve"]
-    thresholds = {f.name: f.thresholds for f in groups["collab"].features}
-    assert expand_where("strict_user_frustration >= {strict_user_frustration.high}", thresholds) == \
-        "strict_user_frustration >= 0.3"
+    features = {f.name: f for f in groups["dialogue"].features}
+    assert list(features) == ["user_corrects", "request_kinds", "coarse_request_kinds"]
+    assert set(features["request_kinds"].labels or {}) == {"fix", "other"}
 
-    assert main(["operators", "disable", "strict"]) == 0
-    assert main(["operators", "disable", "collab.user_frustration"]) == 0
-    assert "collab" not in {g.name for g in load_groups(Project.load(project.root))}
+    assert main(["operators", "disable", "coarse"]) == 0
+    assert main(["operators", "disable", "task.request_kinds"]) == 0
+    assert main(["operators", "disable", "user.corrects"]) == 0
+    assert "dialogue" not in {g.name for g in load_groups(Project.load(project.root))}
+
+
+def test_cli_adapters_list_finds_builtin_and_project_adapters(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    shutil.copyfile(Path(__file__).parents[1] / "src/traj_analyzer/adapters/messages.py",
+                    project.root / "adapters" / "messages.py")
+    capsys.readouterr()
+    assert main(["adapters", "list"]) == 0
+    adapters = {a["name"]: a for a in json.loads(capsys.readouterr().out)["adapters"]}
+    assert adapters["claude_code"]["origin"] == "builtin"
+    assert adapters["messages"]["origin"] == "project"
+    assert adapters["messages"]["used_by"] == ["toucan", "ultrachat"]
+    assert ingest(Project.load(project.root), ["ultrachat"]) == {"ultrachat": 40}
 
 
 def test_meta_fields_copy_metadata_into_features(project: Project, capsys: pytest.CaptureFixture[str]) -> None:

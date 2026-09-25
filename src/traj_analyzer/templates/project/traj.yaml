@@ -18,18 +18,24 @@ datasets:
 operators:
   - use: stats.basic
   - use: stats.tool_usage
-  - use: outcome.task_type
-    call: outcome
-  - use: outcome.task_completed
-    call: outcome
-  - use: collab.user_frustration
-    call: outcome
-  - use: collab.failure_modes
-    call: outcome
+  - use: task.request_kinds
+    call: dialogue
+  - use: user.dissatisfied
+    call: dialogue
+  - use: user.corrects
+    call: dialogue
+  - use: user.follow_up
+    call: dialogue
+  - use: user.approves
+    call: dialogue
+  - use: assistant.claims_done
+    call: dialogue
+  - use: assistant.asks_user
+    call: dialogue
 
 # Optional settings per call group: model overrides engine.model, evidence asks for cited steps.
 calls:
-  outcome: {evidence: true}
+  dialogue: {evidence: true}
 
 render:
   max_step_chars: 4000

@@ -9,11 +9,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from traj_analyzer.schema import Trajectory
 
-FeatureType = Literal["scalar", "boolean", "category", "set", "vector", "distribution"]
+FeatureType = Literal["boolean", "scalar", "category", "set", "vector", "map"]
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,47}")
 
 
 class FeatureSpec(BaseModel):
+    """One feature: a boolean, a number, a label, a set of labels, a vector of numbers, or a map from label to number.
+
+    `labels` fixes the allowed labels of a category, the items of a set, or the keys of a map; without it they are
+    free strings. `range` bounds a scalar, the elements of a vector, or the values of a map.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     name: str
@@ -34,8 +40,10 @@ class FeatureSpec(BaseModel):
 
     @model_validator(mode="after")
     def _shape(self) -> FeatureSpec:
-        if self.type == "distribution" and not self.labels:
-            raise ValueError(f"{self.name}: type distribution needs labels")
+        if self.labels and self.type not in ("category", "set", "map"):
+            raise ValueError(f"{self.name}: labels apply only to category, set and map")
+        if self.range and self.type not in ("scalar", "vector", "map"):
+            raise ValueError(f"{self.name}: range applies only to scalar, vector and map")
         if self.type == "vector" and (self.per is None) == (self.length is None):
             raise ValueError(f"{self.name}: vector needs exactly one of per and length")
         if self.type != "vector" and (self.per or self.length):

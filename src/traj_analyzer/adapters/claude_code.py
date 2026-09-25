@@ -108,3 +108,6 @@ def _text_role(speaker: str, text: str) -> Role:
     if speaker == "user" and _LOCAL_COMMAND.match(text):
         return "system"
     return speaker  # type: ignore[return-value]
+
+
+ADAPTER = ClaudeCodeAdapter

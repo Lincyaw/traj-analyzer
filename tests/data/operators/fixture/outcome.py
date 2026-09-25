@@ -10,7 +10,7 @@ def outputs(params: NoParams) -> list[FeatureSpec]:
         FeatureSpec(name="frustration", type="scalar", range=(0, 1), thresholds={"high": 0.7},
                     description="User dissatisfaction."),
         FeatureSpec(name="curve", type="vector", per="chunk", range=(0, 1), description="Dissatisfaction per chunk."),
-        FeatureSpec(name="time_split", type="distribution", description="Where effort went.",
+        FeatureSpec(name="time_split", type="map", range=(0, 1), description="Where effort went.",
                     labels={"tools": "Calling tools", "answer": "Writing the answer"}),
     ]
 

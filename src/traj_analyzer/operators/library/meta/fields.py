@@ -12,7 +12,7 @@ class MetaField(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     key: str
-    type: Literal["scalar", "boolean", "category", "set"]
+    type: Literal["boolean", "scalar", "category", "set", "map"]
     description: str = ""
     labels: dict[str, str] | None = None
     range: tuple[float, float] | None = None
@@ -50,6 +50,8 @@ def _convert(spec: MetaField, value: Any) -> Any:
             return str(value)
         case "set":
             return sorted({str(v) for v in value})
+        case "map":
+            return {str(k): float(v) for k, v in value.items()}
 
 
 def compute(trajectory: Trajectory, params: Params) -> dict[str, Any]:

@@ -39,7 +39,22 @@ Build such a judgement from atomic features instead, in a sampler condition or i
 For example, "anchored" is `first_suspect` equal to the submitted service, with a single entry in `suspected_services`.
 "Dismissed a true root cause as a victim" is a non-empty `gt_ruled_out`.
 
-## 2. Code or LLM
+## 2. Feature shapes
+
+Every feature takes one of four shapes, so that values from many trajectories can be put side by side and compared.
+
+| Shape | Types | Value | Example | Compared across trajectories as |
+|---|---|---|---|---|
+| boolean | `boolean` | yes or no | `user_corrects` | the share of trajectories where it is true, per group |
+| set | `set`, and `category` for exactly one item | distinct labels | `request_kinds`, `suspected_services` | how often each label occurs; overlaps and differences between groups |
+| vector | `vector`, and `scalar` for one number | ordered numbers | `n_steps`, errors per chunk | distributions, curve shapes, maxima and means |
+| map | `map` | label to number | `tool_calls` = calls per tool | per-label values, aligned by label |
+
+LLM features are `boolean`, `category` or `set`.
+Numbers, vectors and maps come from code operators, which count and measure structured fields.
+Give `labels` when the possible labels are known; the model then chooses among them, and columns stay stable across runs.
+
+## 3. Code or LLM
 
 | The value comes from | Operator kind | Examples |
 |---|---|---|
@@ -50,7 +65,7 @@ Code operators read fields only.
 Do not use regular expressions to interpret text written by a user or a model; ask an LLM operator that question.
 When the same question can be answered from fields, use a code operator: it costs nothing and runs on every trajectory.
 
-## 3. Writing an LLM feature
+## 4. Writing an LLM feature
 
 - Phrase the description as a literal question about what is written: "The user writes that ...", "The agent writes that ...".
 - Say where to look when it is narrow, such as "look only at the step named final_answer".
@@ -86,7 +101,7 @@ OPERATOR = Operator(
 )
 ```
 
-## 4. Writing a code feature
+## 5. Writing a code feature
 
 - `compute(trajectory, params)` returns a value for every output name, or None when the feature does not apply to this trajectory.
 - Read `step.kind`, `step.name`, `step.is_error`, JSON tool arguments and `trajectory.metadata`.
@@ -94,7 +109,12 @@ OPERATOR = Operator(
 - Put code shared by several operators in a file whose name starts with an underscore, and import it from the operator root, e.g. `from rca._parse import calls`.
 - Set `requires` when the operator only makes sense for some trajectories; the others get an empty value.
 
-## 5. Enabling
+## 6. Enabling
+
+Look in `traj operators list` before writing a new operator.
+The library has code operators for size and tool usage (`stats.*`) and for metadata (`meta.fields`), and atomic LLM operators for users (`user.dissatisfied`, `user.corrects`, `user.follow_up`, `user.approves`), assistants (`assistant.claims_done`, `assistant.asks_user`) and requests (`task.request_kinds`).
+
+A feature that needs data the adapter does not provide calls for a change to the adapter, `adapters/<name>.py` defining `ADAPTER`; `traj adapters list` shows the adapters.
 
 Enable an operator with `traj operators enable <name>`:
 
@@ -106,7 +126,7 @@ Describe the dataset in `datasets.<name>.description` of `traj.yaml`: what the t
 It is written at the top of every rendered trajectory, so every LLM operator reads it.
 Hide metadata an LLM must not see, such as evaluation results, with `render.hide_metadata`.
 
-## 6. Extracting and checking
+## 7. Extracting and checking
 
 1. `traj validate --instructions` shows the output schema and the instruction each call group sends.
 2. `traj extract --group <group> --limit 5`, or `--key <key>` for chosen trajectories, runs a small trial.

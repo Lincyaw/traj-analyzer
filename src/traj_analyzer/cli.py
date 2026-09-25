@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
+from traj_analyzer.adapters import discover_adapters
 from traj_analyzer.extract import extract
 from traj_analyzer.features.spec import output_model, render_instruction
 from traj_analyzer.features.table import read_group
@@ -84,6 +85,17 @@ def _enabled(project: Project) -> dict[str, list[str]]:
     for use in project.config.operators:
         enabled.setdefault(use.use, []).append(use.alias or use.use)
     return enabled
+
+
+def cmd_adapters_list(args: argparse.Namespace) -> None:
+    project = Project.find()
+    used = {name: config.adapter for name, config in project.config.datasets.items()}
+    _emit({"adapters": [
+        {"name": ref.name, "origin": ref.origin, "path": str(ref.path),
+         "description": (ref.adapter.__doc__ or "").strip().splitlines()[0] if ref.adapter.__doc__ else "",
+         "used_by": sorted(d for d, adapter in used.items() if adapter == ref.name)}
+        for ref in discover_adapters(project.root).values()
+    ]})
 
 
 def cmd_operators_list(args: argparse.Namespace) -> None:
@@ -287,6 +299,11 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("validate", help="check traj.yaml, enabled operators and samplers")
     p.add_argument("--instructions", action="store_true", help="include rendered instructions")
     p.set_defaults(fn=cmd_validate)
+
+    p = sub.add_parser("adapters", help="data sources")
+    ads = p.add_subparsers(dest="adapters_command", required=True)
+    q = ads.add_parser("list", help="adapters of the package and the project")
+    q.set_defaults(fn=cmd_adapters_list)
 
     p = sub.add_parser("operators", help="browse, enable and disable operators")
     ops = p.add_subparsers(dest="operators_command", required=True)

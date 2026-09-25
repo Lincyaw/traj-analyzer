@@ -20,17 +20,18 @@ export DEEPSEEK_API_KEY=...
 ```sh
 traj init ~/analysis/cc-sessions
 cd ~/analysis/cc-sessions && git init
+traj adapters list
 traj ingest
 traj operators list
 traj extract --group stats-basic --group stats-tool_usage
 traj discover --n 20
-traj operators enable collab.user_frustration --call outcome
 traj validate
-traj extract --group outcome --limit 5
+traj extract --group dialogue --limit 5
 traj sample
 ```
 
-`traj init` 生成的 `traj.yaml` 已经启用了内置算子库中的全部算子，四个 llm 算子共用 `outcome` 调用组。
+`traj init` 生成的 `traj.yaml` 已经启用了内置算子库中的全部通用算子，七个 llm 算子共用 `dialogue` 调用组。
+新数据源和新特征都以文件的形式加入：适配器放在项目的 `adapters/`，算子放在项目的 `operators/`，详见设计文档的“扩展点”一节。
 项目还包含三个 skill：`traj-features` 说明特征怎样设定和提取，`traj-discover` 用来阅读样本并启用或编写算子，`traj-report` 用来撰写报告。
 
 所有命令都向 stdout 输出 JSON。

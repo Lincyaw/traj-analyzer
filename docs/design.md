@@ -75,8 +75,10 @@ trajectory 的全局标识是 `<dataset>/<id>`，文档中称为 key。
 ### 4.1 适配器
 
 适配器把原始文件转换成 Trajectory。
-`traj.yaml` 的 `datasets` 为每个数据集指定适配器、输入 glob 列表、排除 glob 列表和适配器参数。
-适配器可以是内置名称、`module:Class`，或者项目内的 `adapters/foo.py:Class`。
+一个适配器是一个 Python 文件 `<name>.py`，文件中定义 `ADAPTER`，即适配器类；它按 `ADAPTER(**options)` 构造，`read(path, dataset)` 返回该文件中的全部 trajectory。
+内置适配器在包内的 `traj_analyzer/adapters/`，项目适配器在分析项目的 `adapters/`，项目适配器与内置适配器同名时，项目适配器生效。
+`traj.yaml` 的 `datasets` 为每个数据集指定适配器名、输入 glob 列表、排除 glob 列表、适配器参数和数据集说明；已安装的包中的适配器用 `module:Class` 指定。
+`traj adapters list` 列出全部适配器及其使用者。
 
 内置的 `claude_code` 适配器读取 Claude Code session 文件。
 它按文件顺序读取 `user` 和 `assistant` 记录，所以通过回退放弃的对话轮次也保留在 trajectory 中。
@@ -150,7 +152,7 @@ Markdown 开头依次是数据集说明和元数据 JSON 块。
 结构化字段能回答的问题交给 code 算子；需要读懂用户或模型所写文字的问题交给 llm 算子，例如“用户是否纠正了 assistant”。
 “是否过早锁定假设”这类需要综合判断的结论不做成特征，由采样条件或报告组合原子特征得出。
 项目模板中的 `traj-features` skill 给出完整的规则和示例。
-算子名由文件相对算子根目录的路径得到，例如 `collab/user_frustration.py` 的算子名是 `collab.user_frustration`。
+算子名由文件相对算子根目录的路径得到，例如 `user/corrects.py` 的算子名是 `user.corrects`。
 
 | 字段 | 含义 |
 |---|---|
@@ -166,29 +168,22 @@ Markdown 开头依次是数据集说明和元数据 JSON 块。
 下面是一个 llm 算子文件：
 
 ```python
-from pydantic import BaseModel, ConfigDict
-
-from traj_analyzer.operators.base import FeatureSpec, Operator, has_user_messages
+from traj_analyzer.operators.base import FeatureSpec, NoParams, Operator, has_user_messages
 
 
-class Params(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    high: float = 0.5
-
-
-def outputs(params: Params) -> list[FeatureSpec]:
-    return [FeatureSpec(name="user_frustration", type="scalar", range=(0, 1),
-                        thresholds={"high": params.high},
-                        description="How much the user had to push back on the assistant.")]
+def outputs(params: NoParams) -> list[FeatureSpec]:
+    return [FeatureSpec(
+        name="user_corrects", type="boolean",
+        description="A user message points out that the assistant got something wrong: a wrong fact, a misread "
+                    "request, a bug it introduced, or a change the user did not ask for. Polite corrections count.",
+    )]
 
 
 OPERATOR = Operator(
     kind="llm",
-    description="How much the user had to correct or push back on the assistant.",
-    params=Params,
+    description="Whether the user corrects the assistant.",
+    tags=("chat", "agent"),
     outputs=outputs,
-    guidance=lambda params: "Score 0.3 for one correction and 0.6 for several.",
     requires=has_user_messages,
 )
 ```
@@ -205,22 +200,26 @@ OPERATOR = Operator(
 
 内置算子库包含以下算子：
 
-| 算子 | kind | 输出 |
-|---|---|---|
-| `stats.basic` | code | `n_steps`、`n_user_turns`、`total_chars`、`duration_minutes` |
-| `stats.tool_usage` | code | `n_tool_calls`、`tool_error_rate`、`tools_used` |
-| `outcome.task_type` | llm | `task_type` |
-| `outcome.task_completed` | llm | `task_completed` |
-| `collab.user_frustration` | llm | `user_frustration`、`frustration_curve` |
-| `collab.failure_modes` | llm | `failure_modes` |
-| `meta.fields` | code | 由参数 `fields` 决定，把指定的元数据字段复制为特征 |
+| 算子 | kind | 特征 | 类型 |
+|---|---|---|---|
+| `stats.basic` | code | `n_steps`、`n_user_turns`、`total_chars`、`duration_minutes` | scalar |
+| `stats.tool_usage` | code | `n_tool_calls`、`tool_error_rate` | scalar |
+| | | `tool_calls`、`tool_errors`：每个工具的调用次数和报错次数 | map |
+| `meta.fields` | code | 由参数 `fields` 决定，把指定的元数据字段复制为特征 | 按参数 |
+| `task.request_kinds` | llm | `request_kinds`：用户消息提出了哪几类请求 | set |
+| `user.dissatisfied` | llm | `user_dissatisfied`：用户是否写了对 assistant 不满意 | boolean |
+| `user.corrects` | llm | `user_corrects`：用户是否指出 assistant 做错了 | boolean |
+| `user.follow_up` | llm | `user_follow_up`：用户是否在回答之后追加提问或请求 | boolean |
+| `user.approves` | llm | `user_approves`：用户是否认可了结果 | boolean |
+| `assistant.claims_done` | llm | `assistant_claims_done`：assistant 是否写了任务已完成 | boolean |
+| `assistant.asks_user` | llm | `assistant_asks_user`：assistant 是否向用户提问 | boolean |
+
+内置的 llm 算子都是原子特征，每个特征只需找到一句话就能回答。
 
 `meta.fields` 的参数 `fields` 是特征名到字段定义的映射。
-字段定义包括元数据键 `key`、特征类型 `type`（`scalar`、`boolean`、`category`、`set`），以及可选的 `labels`、`range`、`thresholds`、`required`。
+字段定义包括元数据键 `key`、特征类型 `type`（`boolean`、`scalar`、`category`、`set`、`map`），以及可选的 `labels`、`range`、`thresholds`、`required`。
 `required` 缺省为 true，元数据缺少该键时提取报错终止；为 false 时特征值为空。
 这个算子用来把评测结果、模型名、案例属性等外部信息放进特征表，供采样条件和报告使用。
-
-`collab.user_frustration` 和 `collab.failure_modes` 把用户纠正 assistant 的内容计为不满和失误，即使纠正的语气很平和。
 
 ### 5.3 启用算子
 
@@ -229,18 +228,19 @@ OPERATOR = Operator(
 ```yaml
 operators:
   - use: stats.basic
-  - use: collab.user_frustration
-    call: outcome
-    params: {high: 0.6}
-  - use: collab.user_frustration
-    as: strict
-    prefix: strict
-    call: strict
-    params: {high: 0.3}
+  - use: user.corrects
+    call: dialogue
+  - use: task.request_kinds
+    call: dialogue
+  - use: task.request_kinds
+    as: coarse
+    prefix: coarse
+    call: dialogue
+    params:
+      labels: {change: Change code or text., other: Anything else.}
 
 calls:
-  outcome: {evidence: true}
-  strict: {model: DeepSeek-V4-pro}
+  dialogue: {evidence: true, model: DeepSeek-V4-pro}
 ```
 
 | 字段 | 含义 |
@@ -269,15 +269,16 @@ calls:
 
 ### 5.5 特征类型
 
-| type | 输出 | 必需字段 | 可选字段 |
-|---|---|---|---|
-| `scalar` | 浮点数 | | `range` |
-| `boolean` | 布尔值 | | |
-| `category` | 单个标签 | | `labels`，缺省时为任意非空字符串 |
-| `set` | 互不相同的标签列表 | | `labels`，缺省时为自由字符串 |
-| `vector` | 浮点数列表 | `per: chunk` 或 `length: k` | `range` |
-| `distribution` | 标签到概率的映射，总和为 1 | `labels` | |
+| type | 取值 | 必需字段 | 可选字段 | 例子 |
+|---|---|---|---|---|
+| `boolean` | 是或否 | | | 用户是否纠正了 assistant |
+| `scalar` | 一个数 | | `range` | 步数、工具报错率 |
+| `category` | 一个标签 | | `labels`，缺省时为任意非空字符串 | 所属系统、模型名 |
+| `set` | 互不相同的标签列表 | | `labels`，缺省时为任意非空字符串 | 用户提出的请求类别、智能体怀疑过的服务 |
+| `vector` | 有顺序的一串数 | `per: chunk` 或 `length: k` | `range`，约束每个元素 | 每个分片内的报错数 |
+| `map` | 标签到数的映射 | | `labels` 约束键，缺省时为任意非空字符串；`range` 约束值 | 每个工具的调用次数 |
 
+`boolean`、`set`、`vector`、`map` 是四种基本形态，`scalar` 和 `category` 分别是只有一个元素的 vector 和 set。
 所有类型都可以带 `thresholds`，采样条件按名称引用这些阈值。
 code 算子返回的值按同样的类型校验，校验失败时提取报错终止。
 
@@ -368,9 +369,9 @@ worker 每次运行都会处理 mailbox 中全部未完成的任务，包括之�
 | category | `name`，字符串 | 每个标签一列 one-hot |
 | set | 每个标签一列 multi-hot，以及 `name__count` | 每个标签一列 multi-hot |
 | vector | `name__max`、`__min`、`__mean`、`__first`、`__last` | 重采样到 `sampling.vector_length` 个点，加上五个聚合列 |
-| distribution | 每个标签一列概率 | 同左 |
+| map | 每个键一列数值，trajectory 的 map 中没有该键时为 0 | 同左 |
 
-没有 `labels` 的 category 和 set 特征取出现次数最多的 100 个值作为列。
+没有 `labels` 的 category、set 和 map 特征取出现次数最多的 100 个标签作为列。
 宽表读取特征表中当前启用的特征，只取状态为 `ok` 的值；其他状态的行在宽表中是空值。
 `traj status` 按执行组统计特征表：有行的 trajectory 数 `extracted`、没有行的 trajectory 数 `missing`，以及按状态分类的数量。
 距离列先做标准化，缺失值填为该列均值。
@@ -433,6 +434,7 @@ strategies:
 |---|---|
 | `traj init <dir>` | 生成分析项目 |
 | `traj ingest [dataset...]` | 读入原始数据，写出统一格式和渲染文件 |
+| `traj adapters list` | 列出内置和项目中的适配器，以及使用它们的数据集 |
 | `traj operators list [--tag t] [--kind code\|llm]` | 列出内置算子库和项目中的算子，以及各自的启用情况 |
 | `traj operators show <name>` | 输出算子的参数、默认值、输出、guidance 和文件路径 |
 | `traj operators enable <name> [--as a] [--prefix p] [--call c] [--param k=v...]` | 在 `traj.yaml` 中启用算子，保留文件中的注释和格式 |
@@ -447,6 +449,20 @@ strategies:
 
 `operators enable` 和 `operators disable` 先校验修改后的完整配置，校验通过后才写入 `traj.yaml`。
 退出码：0 表示成功，1 表示运行错误，2 表示用法或配置错误。
+
+## 9. 扩展点
+
+读入、渲染、提取、缓存、向量化、采样这条流水线是固定的，接入新数据和新特征只需要增加文件：
+
+| 扩展什么 | 增加什么 | 放在哪里 | 接口 |
+|---|---|---|---|
+| 数据源 | 一个适配器文件 `<name>.py` | 分析项目的 `adapters/`；通用的放进包内的 `traj_analyzer/adapters/` | 定义 `ADAPTER` 类，构造参数来自 `datasets.<name>.options`，`read(path, dataset)` 返回 Trajectory |
+| 特征 | 一个算子文件 `<namespace>/<name>.py` | 分析项目的 `operators/`；通用的放进包内的 `traj_analyzer/operators/library/` | 定义 `OPERATOR`，`outputs` 返回六种特征类型之一的 `FeatureSpec` 列表 |
+| 采样方式 | 一个采样配置 `<name>.yaml` | 分析项目的 `samplers/` | `SamplerSpec` |
+
+适配器和算子之间只通过 Trajectory 交互。
+项目算子依赖某个适配器的约定时，例如元数据键名和特殊步骤的 `name`，约定写在适配器文件的常量和数据集说明中。
+新文件无需注册：`traj adapters list` 和 `traj operators list` 自动发现，项目中的同名文件覆盖包内的文件。
 
 ## 附录
 

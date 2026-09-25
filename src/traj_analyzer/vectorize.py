@@ -13,7 +13,7 @@ from traj_analyzer.operators.catalog import Group
 from traj_analyzer.project import ConfigError, Project
 
 MAX_FREE_LABELS = 100
-"""Columns for category and set features without labels: one per value, for the most frequent values."""
+"""Columns for category, set and map features without labels: one per label, for the most frequent labels."""
 
 
 @dataclass
@@ -129,13 +129,15 @@ def _expand(
             }
             count = series.map(lambda v: len(v) if isinstance(v, list) else None)
             return {**multihot, f"{name}__count": count}, multihot
-        case "distribution":
-            probs = {
-                f"{name}__{ident(lb)}": series.map(
-                    lambda v, lb=lb: v.get(lb, 0.0) if isinstance(v, dict) else None)
-                for lb in feature.labels or ()
+        case "map":
+            keys = list(feature.labels or ()) or _top_values(
+                series.map(lambda v: list(v) if isinstance(v, dict) else None))
+            values = {
+                f"{name}__{ident(key)}": series.map(
+                    lambda v, key=key: float(v.get(key, 0.0)) if isinstance(v, dict) else None)
+                for key in keys
             }
-            return probs, probs
+            return values, values
         case "vector":
             aggregates = {
                 f"{name}__{agg}": series.map(lambda v, fn=fn: fn(v) if isinstance(v, list) else None)

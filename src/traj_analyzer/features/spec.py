@@ -12,13 +12,6 @@ from traj_analyzer.operators.catalog import Group
 from traj_analyzer.project import Project
 
 
-def _sums_to_one(value: dict[str, float]) -> dict[str, float]:
-    total = sum(value.values())
-    if abs(total - 1.0) > 0.02:
-        raise ValueError(f"probabilities must sum to 1, got {total:.3f}")
-    return value
-
-
 def _distinct(value: list[str]) -> list[str]:
     if len(set(value)) != len(value):
         raise ValueError("items must be distinct")
@@ -30,25 +23,22 @@ def value_type(feature: FeatureSpec) -> Any:
     if feature.range:
         number = Annotated[float, Field(ge=feature.range[0], le=feature.range[1])]
     labels = tuple(feature.labels or ())
+    label: Any = Literal[labels] if labels else Annotated[str, Field(min_length=1)]
     match feature.type:
         case "scalar":
             return number
         case "boolean":
             return bool
         case "category":
-            return Literal[labels] if labels else Annotated[str, Field(min_length=1)]  # type: ignore[valid-type]
+            return label
         case "set":
-            item = Literal[labels] if labels else str  # type: ignore[valid-type]
-            return Annotated[list[item], Field(json_schema_extra={"uniqueItems": True}),
-                             AfterValidator(_distinct)]
+            return Annotated[list[label], Field(json_schema_extra={"uniqueItems": True}), AfterValidator(_distinct)]
         case "vector":
             if feature.length:
                 return Annotated[list[number], Field(min_length=feature.length, max_length=feature.length)]
             return Annotated[list[number], Field(min_length=1)]
-        case "distribution":
-            unit = Annotated[float, Field(ge=0, le=1)]
-            return Annotated[dict[Literal[labels], unit],  # type: ignore[valid-type]
-                             AfterValidator(_sums_to_one)]
+        case "map":
+            return dict[label, number]
     raise AssertionError(feature.type)
 
 
@@ -137,20 +127,17 @@ def _render_feature(feature: FeatureSpec) -> str:
                      "(see input.json).")
     if feature.length:
         lines.append(f"- Exactly {feature.length} numbers, evenly spaced over the trajectory.")
-    if feature.type == "boolean":
-        lines.append("- true or false.")
+    shape = {
+        "boolean": "true or false.",
+        "category": "One label.",
+        "set": "A list of distinct labels, possibly empty.",
+        "map": "An object from label to number; leave out labels that do not occur.",
+    }
+    if feature.type in shape:
+        lines.append(f"- {shape[feature.type]}")
     if feature.labels:
-        heading = {
-            "category": "Exactly one of these labels:",
-            "set": "Any subset of these labels, possibly empty:",
-            "distribution": "A probability for each of these labels, summing to 1:",
-        }[feature.type]
-        lines.append(f"- {heading}")
+        lines.append("- The labels are:")
         lines += [f"  - `{label}`: {text}" for label, text in feature.labels.items()]
-    elif feature.type == "set":
-        lines.append("- A list of short distinct strings, possibly empty.")
-    elif feature.type == "category":
-        lines.append("- One short label.")
     return "\n".join(lines) + "\n"
 
 
