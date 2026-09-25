@@ -6,9 +6,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from traj_analyzer.features.spec import FeatureSpec, GroupSpec
 from traj_analyzer.features.table import read_group
 from traj_analyzer.ingest import IndexRow
+from traj_analyzer.operators.base import FeatureSpec
+from traj_analyzer.operators.catalog import Group
 from traj_analyzer.project import ConfigError, Project
 
 MAX_FREE_LABELS = 30
@@ -71,7 +72,7 @@ def ident(label: str) -> str:
 
 
 def build_frame(
-    project: Project, specs: list[GroupSpec], trajectories: list[IndexRow], vector_length: int
+    project: Project, groups: list[Group], trajectories: list[IndexRow], vector_length: int
 ) -> Frame:
     """Use only values computed under the current feature definition from the current trajectory content."""
     query: dict[str, pd.Series] = {}
@@ -80,13 +81,13 @@ def build_frame(
     extracted: dict[str, set[str]] = {}
     shas = {t.key: t.sha256 for t in trajectories}
     index = pd.Index(list(shas), name="key")
-    for spec in specs:
-        digest = spec.spec_hash()
-        values: dict[str, dict[str, object]] = {f.name: {} for f in spec.features}
-        for row in read_group(project, spec.group):
+    for group in groups:
+        digest = group.spec_hash()
+        values: dict[str, dict[str, object]] = {f.name: {} for f in group.features}
+        for row in read_group(project, group.name):
             if row.status == "ok" and row.spec_hash == digest and shas.get(row.key) == row.sha256:
                 values[row.feature][row.key] = row.value
-        for feature in spec.features:
+        for feature in group.features:
             if not values[feature.name]:
                 continue
             q, d = _expand(feature, values[feature.name], index, vector_length)

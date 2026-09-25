@@ -7,17 +7,12 @@ from typing import Any
 from aifn import AiFunction, Mailbox, Model, Policy, Registry, Worker
 from aifn.engines import DeepSeekEngine
 
-from traj_analyzer.features.spec import (
-    ExtractRequest,
-    GroupSpec,
-    load_groups,
-    output_model,
-    write_instruction,
-)
+from traj_analyzer.features.spec import ExtractRequest, output_model, write_instruction
+from traj_analyzer.operators.catalog import Group, load_groups
 from traj_analyzer.project import ConfigError, Project
 
 
-def build_function(project: Project, group: GroupSpec) -> AiFunction[Any, Any]:
+def build_function(project: Project, group: Group) -> AiFunction[Any, Any]:
     engine = project.config.engine
     extract = project.config.extract
     return AiFunction(
@@ -41,7 +36,7 @@ def mailbox(project: Project) -> Mailbox:
 def registry(project: Project) -> Registry:
     return Registry(functions={
         group.function_name: build_function(project, group)
-        for group in load_groups(project) if not group.is_builtin
+        for group in load_groups(project) if not group.is_code
     })
 
 

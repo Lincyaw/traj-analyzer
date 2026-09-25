@@ -11,6 +11,24 @@ datasets:
       include_sidechains: false
       min_user_turns: 1
 
+# Enabled operators; `traj operators list` shows the built-in library and the project's operators/ directory.
+# LLM operators with the same `call` share one LLM call per trajectory.
+operators:
+  - use: stats.basic
+  - use: stats.tool_usage
+  - use: outcome.task_type
+    call: outcome
+  - use: outcome.task_completed
+    call: outcome
+  - use: collab.user_frustration
+    call: outcome
+  - use: collab.failure_modes
+    call: outcome
+
+# Optional settings per call group: model overrides engine.model, evidence asks for cited steps.
+calls:
+  outcome: {evidence: true}
+
 render:
   max_step_chars: 4000
   chunk_chars: 24000

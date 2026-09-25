@@ -13,7 +13,7 @@ from sklearn.cluster import KMeans
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import NearestNeighbors
 
-from traj_analyzer.features.spec import GroupSpec
+from traj_analyzer.operators.catalog import Group
 from traj_analyzer.project import ConfigError, Project, read_yaml
 from traj_analyzer.vectorize import Frame
 
@@ -74,7 +74,7 @@ def weights_for(spec: SamplerSpec, frame: Frame) -> dict[str, float]:
     return dict(spec.features)
 
 
-def sample(spec: SamplerSpec, frame: Frame, groups: list[GroupSpec]) -> Sampling:
+def sample(spec: SamplerSpec, frame: Frame, groups: list[Group]) -> Sampling:
     """Run the strategies in order; each one takes its quota from what earlier ones left."""
     weights = weights_for(spec, frame)
     if spec.population == "complete":

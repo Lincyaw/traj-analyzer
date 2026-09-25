@@ -10,13 +10,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 from pydantic import ValidationError
+from ruamel.yaml import YAML
 
 from traj_analyzer.extract import extract, select_rows
-from traj_analyzer.features.spec import load_groups, output_model, render_instruction
+from traj_analyzer.features.spec import output_model, render_instruction
 from traj_analyzer.features.table import read_group
 from traj_analyzer.ingest import ingest, load_index
-from traj_analyzer.project import CONFIG_FILE, ConfigError, Project
+from traj_analyzer.operators.catalog import discover, instantiate, load_groups
+from traj_analyzer.project import CONFIG_FILE, Config, ConfigError, OperatorUse, Project
 from traj_analyzer.sampling import diverse, enrich, load_sampler, sample, save
 from traj_analyzer.vectorize import Frame, build_frame
 
@@ -61,10 +64,10 @@ def cmd_validate(args: argparse.Namespace) -> None:
     report: dict[str, Any] = {"datasets": list(project.config.datasets), "groups": []}
     for group in load_groups(project):
         entry: dict[str, Any] = {
-            "group": group.group, "engine": group.engine,
+            "group": group.name, "kind": group.kind, "operators": [i.id for i in group.instances],
             "features": [f.name for f in group.features], "spec_hash": group.spec_hash(),
         }
-        if not group.is_builtin:
+        if not group.is_code:
             entry["output_schema"] = output_model(group).model_json_schema()
             if args.instructions:
                 entry["instruction"] = render_instruction(group)
@@ -74,6 +77,103 @@ def cmd_validate(args: argparse.Namespace) -> None:
         load_sampler(project, name)
     report["samplers"] = samplers
     _emit(report)
+
+
+def _enabled(project: Project) -> dict[str, list[str]]:
+    enabled: dict[str, list[str]] = {}
+    for use in project.config.operators:
+        enabled.setdefault(use.use, []).append(use.alias or use.use)
+    return enabled
+
+
+def cmd_operators_list(args: argparse.Namespace) -> None:
+    project = Project.find()
+    enabled = _enabled(project)
+    rows = []
+    for name, ref in discover(project).items():
+        operator = ref.operator
+        if args.tag and args.tag not in operator.tags:
+            continue
+        if args.kind and args.kind != operator.kind:
+            continue
+        rows.append({
+            "name": name, "kind": operator.kind, "origin": ref.origin, "tags": list(operator.tags),
+            "description": operator.description,
+            "outputs": [f.name for f in operator.outputs(operator.params())],
+            "enabled_as": enabled.get(name, []),
+        })
+    _emit({"operators": rows})
+
+
+def cmd_operators_show(args: argparse.Namespace) -> None:
+    project = Project.find()
+    refs = discover(project)
+    if args.name not in refs:
+        raise ConfigError(f"Unknown operator {args.name}")
+    ref = refs[args.name]
+    operator = ref.operator
+    params = operator.params()
+    _emit({
+        "name": ref.name, "kind": operator.kind, "origin": ref.origin, "path": str(ref.path),
+        "tags": list(operator.tags), "description": operator.description,
+        "requires": None if operator.requires is None else operator.requires.__name__,
+        "params_schema": operator.params.model_json_schema(), "params_default": params.model_dump(mode="json"),
+        "outputs": [f.model_dump(mode="json") for f in operator.outputs(params)],
+        "guidance": None if operator.guidance is None else operator.guidance(params),
+        "enabled_as": _enabled(project).get(ref.name, []),
+    })
+
+
+def _edit_operators(project: Project, change: Any) -> list[dict[str, Any]]:
+    """Apply `change` to the operators list of traj.yaml, validate the result, then write it back."""
+    path = project.root / CONFIG_FILE
+    editor = YAML()
+    editor.preserve_quotes = True
+    editor.indent(mapping=2, sequence=4, offset=2)
+    editor.representer.add_representer(
+        type(None), lambda representer, _: representer.represent_scalar("tag:yaml.org,2002:null", "null"))
+    document = editor.load(path)
+    if "operators" not in document:
+        document["operators"] = []
+    change(document["operators"])
+    config = Config.model_validate(json.loads(json.dumps(document)))
+    load_groups(Project(project.root, config))
+    editor.dump(document, path)
+    return [use.model_dump(by_alias=True, exclude_none=True) for use in config.operators]
+
+
+def cmd_operators_enable(args: argparse.Namespace) -> None:
+    project = Project.find()
+    entry: dict[str, Any] = {"use": args.name}
+    if args.alias:
+        entry["as"] = args.alias
+    if args.call:
+        entry["call"] = args.call
+    params = {}
+    for item in args.param or []:
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise ConfigError(f"--param must be key=value: {item}")
+        params[key] = yaml.safe_load(value)
+    if params:
+        entry["params"] = params
+    refs = discover(project)
+    if args.name not in refs:
+        raise ConfigError(f"Unknown operator {args.name}")
+    instantiate(refs[args.name], OperatorUse.model_validate(entry))
+    _emit({"operators": _edit_operators(project, lambda ops: ops.append(entry))})
+
+
+def cmd_operators_disable(args: argparse.Namespace) -> None:
+    project = Project.find()
+
+    def remove(ops: list[Any]) -> None:
+        keep = [op for op in ops if args.name not in (op["use"], op.get("as"))]
+        if len(keep) == len(ops):
+            raise ConfigError(f"No enabled operator is named {args.name}")
+        ops[:] = keep
+
+    _emit({"operators": _edit_operators(project, remove)})
 
 
 def _frame(project: Project, datasets: list[str] | None, groups: list[str] | None = None) -> Frame:
@@ -88,16 +188,16 @@ def cmd_discover(args: argparse.Namespace) -> None:
         order = [int(i) for i in np.random.default_rng(args.seed).permutation(len(rows))]
         chosen = [(rows[i], {}) for i in order[: args.n]]
     else:
-        frame = _frame(project, args.dataset, [args.group])
+        groups = args.group or [g.name for g in load_groups(project) if g.is_code]
+        frame = _frame(project, args.dataset, groups)
         if not frame.columns:
-            raise ConfigError(f"Group {args.group} has no extracted values; "
-                              f"run `traj extract --group {args.group}` first")
+            raise ConfigError(f"Groups {groups} have no extracted values; run `traj extract` for them first")
         frame = frame.complete(list(frame.columns))
         x = frame.matrix(dict.fromkeys(frame.columns, 1.0))
         position = {row.key: row for row in rows}
         keys = list(frame.query.index)
         picks = diverse("discover", args.n, list(range(len(keys))), keys, x, args.seed,
-                         population=list(range(len(keys))))
+                        population=list(range(len(keys))))
         chosen = [(position[p.key], p.reason) for p in picks]
     _emit({"method": args.method, "population": len(rows), "trajectories": [
         {"key": r.key, "markdown": str(project.dataset_dir(r.dataset) / r.markdown),
@@ -156,7 +256,7 @@ def cmd_show(args: argparse.Namespace) -> None:
         return
     features = {}
     for group in load_groups(project):
-        for row in read_group(project, group.group):
+        for row in read_group(project, group.name):
             if row.key == args.key:
                 features[row.feature] = row.model_dump(exclude={"key", "feature"})
     _emit({"key": args.key, "markdown": str(path), "features": features})
@@ -172,13 +272,14 @@ def cmd_status(args: argparse.Namespace) -> None:
     groups = {}
     for group in load_groups(project):
         digest = group.spec_hash()
-        stored = read_group(project, group.group)
+        stored = read_group(project, group.name)
         fresh = [r for r in stored if r.spec_hash == digest and shas.get(r.key) == r.sha256]
         current = {r.key for r in fresh if r.status == "ok"}
         problems = {r.key for r in fresh if r.status != "ok"}
         stale = {r.key for r in stored if r.key in shas} - current - problems
-        groups[group.group] = {"ok": len(current), "not_ok": len(problems), "stale": len(stale),
-                               "missing": len(shas) - len(current | problems | stale)}
+        groups[group.name] = {"operators": [i.id for i in group.instances], "ok": len(current),
+                              "not_ok": len(problems), "stale": len(stale),
+                              "missing": len(shas) - len(current | problems | stale)}
     _emit({"project": str(project.root), "datasets": datasets, "groups": groups})
 
 
@@ -196,16 +297,35 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("datasets", nargs="*")
     p.set_defaults(fn=cmd_ingest)
 
-    p = sub.add_parser("validate", help="check traj.yaml, feature groups and samplers")
+    p = sub.add_parser("validate", help="check traj.yaml, enabled operators and samplers")
     p.add_argument("--instructions", action="store_true", help="include rendered instructions")
     p.set_defaults(fn=cmd_validate)
+
+    p = sub.add_parser("operators", help="browse, enable and disable operators")
+    ops = p.add_subparsers(dest="operators_command", required=True)
+    q = ops.add_parser("list", help="operators in the built-in library and the project")
+    q.add_argument("--tag")
+    q.add_argument("--kind", choices=["code", "llm"])
+    q.set_defaults(fn=cmd_operators_list)
+    q = ops.add_parser("show", help="one operator's params, outputs and guidance")
+    q.add_argument("name")
+    q.set_defaults(fn=cmd_operators_show)
+    q = ops.add_parser("enable", help="add an operator to traj.yaml")
+    q.add_argument("name")
+    q.add_argument("--as", dest="alias")
+    q.add_argument("--call", help="call group for llm operators")
+    q.add_argument("--param", action="append", help="key=value, value parsed as YAML")
+    q.set_defaults(fn=cmd_operators_enable)
+    q = ops.add_parser("disable", help="remove operators with this name or alias from traj.yaml")
+    q.add_argument("name")
+    q.set_defaults(fn=cmd_operators_disable)
 
     p = sub.add_parser("discover", help="pick trajectories to read when proposing features")
     p.add_argument("--n", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--dataset", action="append")
     p.add_argument("--method", choices=["diversity", "random"], default="diversity")
-    p.add_argument("--group", default="stats", help="features used by the diversity method")
+    p.add_argument("--group", action="append", help="groups whose features drive diversity; default all code groups")
     p.set_defaults(fn=cmd_discover)
 
     p = sub.add_parser("extract", help="compute features")

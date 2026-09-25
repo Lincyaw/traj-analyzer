@@ -15,8 +15,10 @@ from traj_analyzer.adapters.claude_code import ClaudeCodeAdapter
 from traj_analyzer.adapters.messages import MessagesAdapter
 from traj_analyzer.cli import main
 from traj_analyzer.extract import extract
-from traj_analyzer.features.spec import GroupSpec, load_groups, output_model
+from traj_analyzer.features.spec import output_model, render_instruction
 from traj_analyzer.ingest import ingest, load_index, render_markdown
+from traj_analyzer.operators.base import FeatureSpec, Operator
+from traj_analyzer.operators.catalog import discover, load_groups
 from traj_analyzer.project import Project, RenderConfig
 from traj_analyzer.runtime import mailbox, policy, registry
 from traj_analyzer.sampling import expand_where, load_sampler, sample
@@ -42,19 +44,12 @@ ULTRACHAT = {
     "input": [str(DATA / "ultrachat.jsonl")],
     "options": {"id_key": "prompt_id", "metadata_keys": ["prompt"]},
 }
-OUTCOME = {
-    "group": "outcome",
-    "features": [
-        {"name": "task_type", "type": "category", "description": "Kind of request.",
-         "labels": {"lookup": "Answer from tools", "creative": "Write something", "other": "Else"}},
-        {"name": "frustration", "type": "scalar", "range": [0, 1],
-         "thresholds": {"high": 0.7}, "description": "User dissatisfaction."},
-        {"name": "curve", "type": "vector", "per": "chunk", "range": [0, 1],
-         "description": "Dissatisfaction per chunk."},
-        {"name": "time_split", "type": "distribution", "description": "Where effort went.",
-         "labels": {"tools": "Calling tools", "answer": "Writing the answer"}},
-    ],
-}
+OPERATORS = [
+    {"use": "stats.basic"},
+    {"use": "stats.tool_usage"},
+    {"use": "fixture.tool_share"},
+    {"use": "fixture.outcome", "call": "outcome"},
+]
 
 
 def test_claude_code_adapter_reads_real_session() -> None:
@@ -99,8 +94,54 @@ def test_chunks_break_between_steps() -> None:
     assert all(f"### #{s.index} " in text for s in trajectory.steps)
 
 
-def test_output_model_enforces_constraints() -> None:
-    model = output_model(GroupSpec.model_validate(OUTCOME))
+def test_feature_spec_rejects_bad_shapes() -> None:
+    with pytest.raises(ValidationError):
+        FeatureSpec(name="c", type="category", description="no labels")
+    with pytest.raises(ValidationError):
+        FeatureSpec(name="v", type="vector", description="neither per nor length")
+    with pytest.raises(ValidationError):
+        FeatureSpec(name="bad__name", type="scalar", description="double underscore")
+
+
+def test_operator_kind_must_match_its_functions() -> None:
+    with pytest.raises(ValueError, match="compute"):
+        Operator(kind="code", description="no compute", outputs=lambda p: [])
+    with pytest.raises(ValueError, match="compute"):
+        Operator(kind="llm", description="compute", outputs=lambda p: [], compute=lambda t, p: {})
+
+
+def test_library_operators_load_and_render() -> None:
+    refs = discover(None)
+    assert {"stats.basic", "stats.tool_usage", "outcome.task_type", "outcome.task_completed",
+            "collab.user_frustration", "collab.failure_modes"} <= set(refs)
+    for ref in refs.values():
+        outputs = ref.operator.outputs(ref.operator.params())
+        assert outputs and all(isinstance(f, FeatureSpec) for f in outputs)
+
+
+@pytest.fixture
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
+    root = tmp_path / "proj"
+    assert main(["init", str(root)]) == 0
+    config = yaml.safe_load((root / "traj.yaml").read_text(encoding="utf-8"))
+    config["datasets"] = {"toucan": TOUCAN, "ultrachat": ULTRACHAT}
+    config["operators"] = OPERATORS
+    config["calls"] = {"outcome": {"evidence": True}}
+    (root / "traj.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    shutil.copytree(DATA / "operators", root / "operators", dirs_exist_ok=True)
+    monkeypatch.chdir(root)
+    loaded = Project.load(root)
+    assert ingest(loaded) == {"toucan": 30, "ultrachat": 40}
+    return loaded
+
+
+def test_groups_follow_enabled_operators(project: Project) -> None:
+    groups = {g.name: g for g in load_groups(project)}
+    assert set(groups) == {"stats-basic", "stats-tool_usage", "fixture-tool_share", "outcome"}
+    outcome = groups["outcome"]
+    assert [f.name for f in outcome.features] == ["task_type", "frustration", "curve", "time_split"]
+    assert "### Operator `fixture.outcome`" in render_instruction(outcome)
+    model = output_model(outcome)
     answer = {
         "task_type": {"value": "lookup", "evidence": "#1"},
         "frustration": {"value": 0.2, "evidence": "#2"},
@@ -114,48 +155,26 @@ def test_output_model_enforces_constraints() -> None:
             model.model_validate({**answer, name: {"value": bad, "evidence": "#1"}})
 
 
-def test_spec_rejects_bad_shapes() -> None:
-    with pytest.raises(ValidationError):
-        GroupSpec.model_validate({"group": "g", "features": [
-            {"name": "c", "type": "category", "description": "no labels"}]})
-    with pytest.raises(ValidationError):
-        GroupSpec.model_validate({"group": "g", "features": [
-            {"name": "v", "type": "vector", "description": "neither per nor length"}]})
-    with pytest.raises(ValidationError):
-        GroupSpec.model_validate({"group": "g", "engine": "builtin", "features": [
-            {"name": "s", "type": "scalar", "fn": "missing", "description": "unknown fn"}]})
+def test_code_operators_and_requires(project: Project) -> None:
+    reports = {r.group: r for r in extract(project, groups=["stats-basic", "stats-tool_usage", "fixture-tool_share"])}
+    assert reports["stats-basic"].ok == 70
+    share = reports["fixture-tool_share"]
+    assert (share.ok, share.not_applicable) == (30, 40)
+    groups = load_groups(project)
+    frame = build_frame(project, groups, load_index(project), vector_length=4)
+    assert frame.query["tool_share"].notna().sum() == 30
+    assert len(frame.complete(["tool_share", "n_steps"]).query) == 70
 
 
-@pytest.fixture
-def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
-    root = tmp_path / "proj"
-    assert main(["init", str(root)]) == 0
-    config = yaml.safe_load((root / "traj.yaml").read_text(encoding="utf-8"))
-    config["datasets"] = {"toucan": TOUCAN, "ultrachat": ULTRACHAT}
-    (root / "traj.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
-    stats = yaml.safe_load((root / "features" / "stats.yaml").read_text(encoding="utf-8"))
-    for feature in stats["features"]:
-        if feature["name"] == "n_tool_calls":
-            feature["thresholds"] = {"many": 4}
-    (root / "features" / "stats.yaml").write_text(yaml.safe_dump(stats), encoding="utf-8")
-    (root / "features" / "outcome.yaml").write_text(yaml.safe_dump(OUTCOME), encoding="utf-8")
-    monkeypatch.chdir(root)
-    loaded = Project.load(root)
-    assert ingest(loaded) == {"toucan": 30, "ultrachat": 40}
-    return loaded
-
-
-def test_sampling_over_builtin_features(project: Project) -> None:
-    (report,) = extract(project, groups=["stats"])
-    assert report.ok == 70
-    groups = load_groups(project, ["stats"])
+def test_sampling_over_code_features(project: Project) -> None:
+    extract(project, groups=["stats-basic", "stats-tool_usage"])
+    groups = load_groups(project, ["stats-basic", "stats-tool_usage"])
     frame = build_frame(project, groups, load_index(project), vector_length=5)
     assert {"n_steps", "n_tool_calls", "tools_used__count"} <= set(frame.query.columns)
 
     spec = load_sampler(project, "default").model_copy(update={"budget": 12})
     spec.strategies.insert(0, spec.strategies[0].model_copy(update={
-        "kind": "target", "label": "busy", "quota": 4,
-        "where": "n_tool_calls >= {n_tool_calls.many}", "within": "top:n_tool_calls"}))
+        "kind": "target", "label": "busy", "quota": 4, "where": "n_tool_calls >= 4", "within": "top:n_tool_calls"}))
     result = sample(spec, frame, groups)
     picks = result.picks
     assert result.population == 70
@@ -165,30 +184,6 @@ def test_sampling_over_builtin_features(project: Project) -> None:
     assert {p.strategy for p in picks} == {"busy", "outlier", "diverse"}
     (busy_report, *_) = result.strategies
     assert busy_report.matched == int((frame.query["n_tool_calls"] >= 4).sum())
-
-
-def test_complete_population_excludes_missing_features(project: Project, tmp_path: Path) -> None:
-    extract(project, groups=["stats"])
-    keys = [row.key for row in load_index(project) if row.sha256 in {p.name for p in REPLAY.iterdir()}]
-    extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "replay"))
-    groups = load_groups(project)
-    frame = build_frame(project, groups, load_index(project), vector_length=4)
-    spec = load_sampler(project, "default").model_copy(update={
-        "budget": 3, "features": ["frustration", "n_steps"]})
-    assert sample(spec, frame, groups).population == len(keys)
-    assert sample(spec.model_copy(update={"population": "all"}), frame, groups).population == 70
-
-
-def test_cli_discover_and_sample(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["extract", "--group", "stats"]) == 0
-    capsys.readouterr()
-    assert main(["discover", "--n", "5"]) == 0
-    discovered = json.loads(capsys.readouterr().out)
-    assert len(discovered["trajectories"]) == 5
-    assert all(Path(t["markdown"]).is_file() for t in discovered["trajectories"])
-    assert main(["sample", "--budget", "6"]) == 0
-    selection = json.loads(capsys.readouterr().out)
-    assert len(selection["picks"]) == 6 and Path(selection["selection"]).is_file()
 
 
 class ReplayWorkers:
@@ -209,42 +204,105 @@ class ReplayWorkers:
                policy=policy(project), id="replay").work()
 
 
+def _recorded_keys(project: Project) -> list[str]:
+    recorded = {p.name for p in REPLAY.iterdir()}
+    keys = [row.key for row in load_index(project, ["toucan"]) if row.sha256 in recorded]
+    assert len(keys) == len(recorded)
+    return keys
+
+
 def test_llm_extraction_replays_real_runs(project: Project, tmp_path: Path) -> None:
-    recorded = sorted(p.name for p in REPLAY.iterdir())
-    rows = [row for row in load_index(project, ["toucan"]) if row.sha256 in recorded]
-    assert len(rows) == len(recorded)
-    keys = [row.key for row in rows]
+    keys = _recorded_keys(project)
     (report,) = extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "replay"))
     assert (report.ok, report.failed, report.refused, report.pending) == (len(keys), 0, 0, 0)
 
     (again,) = extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "unused"))
     assert again.cached == len(keys)
 
-    groups = load_groups(project, ["outcome"])
-    frame = build_frame(project, groups, rows, vector_length=4)
+    rows = [row for row in load_index(project) if row.key in keys]
+    frame = build_frame(project, load_groups(project, ["outcome"]), rows, vector_length=4)
     assert frame.query["frustration"].between(0, 1).all()
-    assert set(frame.query["task_type"]) <= set(OUTCOME["features"][0]["labels"])
+    assert set(frame.query["task_type"]) <= {"lookup", "creative", "other"}
     assert {"curve__t3", "time_split__tools"} <= set(frame.distance.columns)
     for key in keys:
         assert main(["show", key]) == 0
 
 
+def test_llm_operators_skip_trajectories_they_do_not_apply_to(project: Project, tmp_path: Path) -> None:
+    keys = [*_recorded_keys(project), *(row.key for row in load_index(project, ["ultrachat"])[:2])]
+    (report,) = extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "replay"))
+    assert (report.ok, report.not_applicable) == (3, 2)
+    requests = list((project.mailbox_dir / "requests").iterdir())
+    assert len(requests) == 3
+
+
+def test_complete_population_excludes_missing_features(project: Project, tmp_path: Path) -> None:
+    extract(project, groups=["stats-basic"])
+    keys = _recorded_keys(project)
+    extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "replay"))
+    groups = load_groups(project)
+    frame = build_frame(project, groups, load_index(project), vector_length=4)
+    spec = load_sampler(project, "default").model_copy(update={"budget": 3, "features": ["frustration", "n_steps"]})
+    assert sample(spec, frame, groups).population == len(keys)
+    assert sample(spec.model_copy(update={"population": "all"}), frame, groups).population == 70
+
+
+def test_cli_discover_and_sample(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["extract", "--group", "stats-basic", "--group", "stats-tool_usage",
+                 "--group", "fixture-tool_share"]) == 0
+    capsys.readouterr()
+    assert main(["discover", "--n", "5"]) == 0
+    discovered = json.loads(capsys.readouterr().out)
+    assert len(discovered["trajectories"]) == 5
+    assert all(Path(t["markdown"]).is_file() for t in discovered["trajectories"])
+    assert main(["sample", "--budget", "6"]) == 0
+    selection = json.loads(capsys.readouterr().out)
+    assert len(selection["picks"]) == 6 and Path(selection["selection"]).is_file()
+
+
+def test_cli_operators_enable_and_disable(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
+    capsys.readouterr()
+    assert main(["operators", "list", "--kind", "llm"]) == 0
+    listed = {op["name"]: op for op in json.loads(capsys.readouterr().out)["operators"]}
+    assert listed["fixture.outcome"]["origin"] == "project"
+    assert listed["fixture.outcome"]["enabled_as"] == ["fixture.outcome"]
+    assert listed["collab.user_frustration"]["enabled_as"] == []
+
+    assert main(["operators", "show", "collab.user_frustration"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["params_default"] == {"high": 0.5}
+
+    before = (project.root / "traj.yaml").read_text(encoding="utf-8")
+    assert main(["operators", "enable", "fixture.tool_share"]) == 2
+    assert (project.root / "traj.yaml").read_text(encoding="utf-8") == before
+
+    assert main(["operators", "enable", "collab.user_frustration", "--as", "pushback", "--call", "collab",
+                 "--param", "high=0.8"]) == 0
+    capsys.readouterr()
+    reloaded = Project.load(project.root)
+    groups = {g.name: g for g in load_groups(reloaded)}
+    assert [f.name for f in groups["collab"].features] == ["pushback_user_frustration", "pushback_frustration_curve"]
+    assert groups["collab"].features[0].thresholds == {"high": 0.8}
+    assert expand_where("pushback_user_frustration >= {pushback_user_frustration.high}",
+                        {f.name: f.thresholds for f in groups["collab"].features}) == \
+        "pushback_user_frustration >= 0.8"
+
+    assert main(["operators", "disable", "pushback"]) == 0
+    assert "collab" not in {g.name for g in load_groups(Project.load(project.root))}
+
+
 def test_changed_content_makes_features_stale(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
-    extract(project, groups=["stats"])
+    extract(project, groups=["stats-basic"])
     config = yaml.safe_load((project.root / "traj.yaml").read_text(encoding="utf-8"))
     config["render"]["max_step_chars"] = 200
     (project.root / "traj.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     ingest(Project.load(project.root), ["toucan"])
     capsys.readouterr()
     assert main(["status"]) == 0
-    stats = json.loads(capsys.readouterr().out)["groups"]["stats"]
+    stats = json.loads(capsys.readouterr().out)["groups"]["stats-basic"]
     assert (stats["ok"], stats["stale"]) == (40, 30)
-    frame = build_frame(project, load_groups(project, ["stats"]), load_index(project), vector_length=4)
+    frame = build_frame(project, load_groups(project, ["stats-basic"]), load_index(project), vector_length=4)
     assert len(frame.complete(["n_steps"]).query) == 40
-
-
-def test_threshold_expansion() -> None:
-    assert expand_where("x >= {x.high}", {"x": {"high": 0.7}}) == "x >= 0.7"
 
 
 def test_dry_run_writes_nothing(project: Project) -> None:

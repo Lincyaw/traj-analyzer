@@ -18,6 +18,7 @@ class FeatureRow(BaseModel):
     evidence: str | None = None
     status: Status = "ok"
     detail: str | None = None
+    """Why a value is missing: the operator does not apply, or the call was refused or failed."""
     spec_hash: str
     sha256: str
     """Content hash of the rendered trajectory the value was computed from."""

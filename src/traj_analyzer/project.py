@@ -51,9 +51,25 @@ class SamplingConfig(_Strict):
     vector_length: int = Field(default=10, ge=2)
 
 
+class OperatorUse(_Strict):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    use: str
+    alias: str | None = Field(default=None, alias="as")
+    call: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class CallConfig(_Strict):
+    model: str | None = None
+    evidence: bool = True
+
+
 class Config(_Strict):
     version: Literal[1] = 1
     datasets: dict[str, DatasetConfig] = Field(default_factory=dict)
+    operators: list[OperatorUse] = Field(default_factory=list)
+    calls: dict[str, CallConfig] = Field(default_factory=dict)
     render: RenderConfig = Field(default_factory=RenderConfig)
     engine: EngineConfig = Field(default_factory=EngineConfig)
     extract: ExtractConfig = Field(default_factory=ExtractConfig)
@@ -94,8 +110,8 @@ class Project:
         return self.data_dir / "datasets" / dataset
 
     @property
-    def features_dir(self) -> Path:
-        return self.root / "features"
+    def operators_dir(self) -> Path:
+        return self.root / "operators"
 
     @property
     def samplers_dir(self) -> Path:
