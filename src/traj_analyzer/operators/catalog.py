@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from traj_analyzer.operators.base import FeatureSpec, Operator
-from traj_analyzer.project import ConfigError, OperatorUse, Project
+from traj_analyzer.project import CallConfig, ConfigError, OperatorUse, Project
 from traj_analyzer.schema import Trajectory
 
 LIBRARY = Path(__file__).parent / "library"
@@ -64,6 +64,7 @@ class Group:
     instances: list[Instance]
     evidence: bool = False
     model: str | None = None
+    guidance: str = ""
     features: list[FeatureSpec] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -79,7 +80,7 @@ class Group:
 
     def spec_hash(self) -> str:
         payload = {
-            "kind": self.kind, "evidence": self.evidence, "model": self.model,
+            "kind": self.kind, "evidence": self.evidence, "model": self.model, "guidance": self.guidance,
             "instances": [{"operator": i.ref.name, "source": i.ref.source_sha, "id": i.id,
                            "params": i.params.model_dump(mode="json")} for i in self.instances],
         }
@@ -91,6 +92,9 @@ def discover(project: Project | None) -> dict[str, OperatorRef]:
     roots: list[tuple[Literal["library", "project"], Path]] = [("library", LIBRARY)]
     if project is not None and project.operators_dir.is_dir():
         roots.append(("project", project.operators_dir))
+        # Project operators import their shared underscore modules by path from this root, e.g. `rca._parse`.
+        if str(project.operators_dir) not in sys.path:
+            sys.path.insert(0, str(project.operators_dir))
     refs: dict[str, OperatorRef] = {}
     for origin, root in roots:
         # Files starting with an underscore hold code shared by operators, so they count toward every source hash.
@@ -160,10 +164,9 @@ def load_groups(project: Project, only: list[str] | None = None) -> list[Group]:
         raise ConfigError(f"calls configured without enabled llm operators: {unknown_calls}")
     llm = []
     for call, instances in calls.items():
-        config = project.config.calls.get(call)
-        llm.append(Group(name=call, kind="llm", instances=instances,
-                         evidence=config.evidence if config else True,
-                         model=config.model if config else None))
+        config = project.config.calls.get(call, CallConfig())
+        llm.append(Group(name=call, kind="llm", instances=instances, evidence=config.evidence, model=config.model,
+                         guidance=config.guidance))
     groups = [*code, *llm]
     _check_names(groups)
     if only:

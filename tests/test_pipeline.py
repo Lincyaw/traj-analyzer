@@ -127,7 +127,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
     config = yaml.safe_load((root / "traj.yaml").read_text(encoding="utf-8"))
     config["datasets"] = {"toucan": TOUCAN, "ultrachat": ULTRACHAT}
     config["operators"] = OPERATORS
-    config["calls"] = {"outcome": {"evidence": True}}
+    config["calls"] = {"outcome": {"evidence": True, "guidance": "Records come from public tool-use datasets."}}
     (root / "traj.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     shutil.copytree(DATA / "operators", root / "operators", dirs_exist_ok=True)
     monkeypatch.chdir(root)
@@ -141,7 +141,9 @@ def test_groups_follow_enabled_operators(project: Project) -> None:
     assert set(groups) == {"stats-basic", "stats-tool_usage", "fixture-tool_share", "outcome"}
     outcome = groups["outcome"]
     assert [f.name for f in outcome.features] == ["task_type", "frustration", "curve", "time_split"]
-    assert "### Operator `fixture.outcome`" in render_instruction(outcome)
+    instruction = render_instruction(outcome)
+    assert "### Operator `fixture.outcome`" in instruction
+    assert instruction.count("Records come from public tool-use datasets.") == 1
     model = output_model(outcome)
     answer = {
         "task_type": {"value": "lookup", "evidence": "#1"},
@@ -320,6 +322,8 @@ def test_hidden_metadata_stays_out_of_the_markdown() -> None:
     hidden, _ = render_markdown(trajectory, RenderConfig(hide_metadata=["title", "cwd"]))
     assert f'"title": "{trajectory.metadata["title"]}"' in shown
     assert '"title"' not in hidden and '"cwd"' not in hidden and '"gitBranch"' in hidden
+    patterned, _ = render_markdown(trajectory, RenderConfig(hide_metadata=["*ed_at"]))
+    assert '"started_at"' not in patterned and '"ended_at"' not in patterned and '"title"' in patterned
 
 
 def test_changed_content_makes_features_stale(project: Project, capsys: pytest.CaptureFixture[str]) -> None:

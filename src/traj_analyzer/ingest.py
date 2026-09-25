@@ -101,7 +101,8 @@ def render_markdown(trajectory: Trajectory, render: RenderConfig) -> tuple[str, 
     Chunks break only between steps, so a step longer than the budget forms a chunk of its own.
     """
     header = [f"# {trajectory.key}", ""]
-    shown = {k: v for k, v in trajectory.metadata.items() if k not in render.hide_metadata}
+    shown = {k: v for k, v in trajectory.metadata.items()
+             if not any(fnmatch.fnmatchcase(k, pattern) for pattern in render.hide_metadata)}
     if shown:
         header += ["```json", json.dumps(shown, ensure_ascii=False, indent=1), "```", ""]
     chunks: list[list[str]] = [[]]

@@ -109,7 +109,10 @@ A trajectory with little content still gets an answer that fits what is there.
 
 
 def render_instruction(group: Group) -> str:
-    parts = [_PREAMBLE, "## Features\n"]
+    parts = [_PREAMBLE]
+    if group.guidance:
+        parts.append(f"## Context\n\n{group.guidance.strip()}\n")
+    parts.append("## Features\n")
     for instance in group.instances:
         operator = instance.ref.operator
         parts.append(f"### Operator `{instance.id}`\n\n{operator.description}\n")

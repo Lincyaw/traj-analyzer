@@ -126,6 +126,9 @@ Anthropic 块中的 `tool_result` 转换为 role 为 `tool` 的步骤，即使�
 
 Markdown 开头的 JSON 块列出 trajectory 的元数据。
 `render.hide_metadata` 中列出的键不写入 Markdown，llm 算子因此看不到这些信息，例如模型名和评测结果；这些键仍然保存在 `<id>.json` 中，code 算子可以读取。
+列表项可以是键名，也可以是 `eval_*` 这样的通配模式。
+
+项目算子文件可以从算子根目录导入以下划线开头的共享模块，例如 `from rca._parse import calls`，因为加载项目算子时会把项目的 `operators/` 目录加入 `sys.path`。
 
 ## 5. 算子
 
@@ -233,8 +236,9 @@ calls:
 | `call` | 只用于 llm 算子，指定调用组，缺省为 `default` |
 | `params` | 覆盖算子参数的默认值 |
 
-`calls` 为调用组设置 `model` 和 `evidence`。
+`calls` 为调用组设置 `model`、`evidence` 和 `guidance`。
 `model` 覆盖 `engine.model`，`evidence` 为 true 时每个特征附带一段引用步号的判断依据，缺省为 true。
+`guidance` 是组内所有算子共用的背景说明，例如数据的已知缺陷，在 instruction 开头只出现一次。
 
 同一个算子可以用不同的 `as` 和参数启用多次。
 特征名在整个项目内唯一，因为它们会成为宽表的列名，重名时配置校验报错。

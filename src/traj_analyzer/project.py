@@ -29,7 +29,7 @@ class RenderConfig(_Strict):
     max_step_chars: int = Field(default=4000, ge=1)
     chunk_chars: int = Field(default=24000, ge=1)
     hide_metadata: list[str] = Field(default_factory=list)
-    """Metadata keys left out of the rendered Markdown, so that LLM operators do not see them."""
+    """Metadata keys, or glob patterns such as `eval_*`, left out of the rendered Markdown for LLM operators."""
 
 
 class EngineConfig(_Strict):
@@ -65,6 +65,8 @@ class OperatorUse(_Strict):
 class CallConfig(_Strict):
     model: str | None = None
     evidence: bool = True
+    guidance: str = ""
+    """Context shared by every operator of the call, written once at the top of its instruction."""
 
 
 class Config(_Strict):
