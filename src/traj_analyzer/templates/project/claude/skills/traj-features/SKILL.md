@@ -19,12 +19,12 @@ Good LLM features, each answerable by finding one statement:
 
 | Feature | Type | Question |
 |---|---|---|
-| `user_dissatisfied` | boolean | Does the user write that they are unhappy with the assistant? |
+| `user_complains` | boolean | Does the user write that they are unhappy with the assistant? |
 | `user_follow_up` | boolean | Does the user ask a further question after the assistant answers? |
 | `user_corrects` | boolean | Does the user point out that the assistant got something wrong? |
 | `suspected_services` | set | Which services does the agent write may be the root cause? |
 | `ruled_out_services` | set | Which services does the agent write are not the root cause? |
-| `says_data_missing` | boolean | Does the agent write that some expected data is missing? |
+| `agent_notes_missing_data` | boolean | Does the agent write that some expected data is missing? |
 | `evidence_signals` | set | Which kinds of signal do the submitted evidence claims describe? |
 
 Questions that must not be features, because they need judgement across the whole trajectory:
@@ -37,7 +37,10 @@ Questions that must not be features, because they need judgement across the whol
 
 Build such a judgement from atomic features instead, in a sampler condition or in a report.
 For example, "anchored" is `first_suspect` equal to the submitted service, with a single entry in `suspected_services`.
-"Dismissed a true root cause as a victim" is a non-empty `gt_ruled_out`.
+"Dismissed a true root cause as a victim" is a non-empty `ruled_out_gt_services`.
+
+Name a feature with a noun, such as `tool_calls` or `suspected_services`, or with a noun and a verb, such as `user_corrects` or `agent_notes_missing_data`.
+A name never starts with a verb.
 
 ## 2. Feature shapes
 
@@ -112,7 +115,7 @@ OPERATOR = Operator(
 ## 6. Enabling
 
 Look in `traj operators list` before writing a new operator.
-The library has code operators for size and tool usage (`stats.*`) and for metadata (`meta.fields`), and atomic LLM operators for users (`user.dissatisfied`, `user.corrects`, `user.follow_up`, `user.approves`), assistants (`assistant.claims_done`, `assistant.asks_user`) and requests (`task.request_kinds`).
+The library has code operators for size and tool usage (`stats.*`) and for metadata (`meta.fields`), and atomic LLM operators for users (`user.complains`, `user.corrects`, `user.follow_up`, `user.approves`), assistants (`assistant.claims_done`, `assistant.asks_user`) and requests (`task.request_kinds`).
 
 A feature that needs data the adapter does not provide calls for a change to the adapter, `adapters/<name>.py` defining `ADAPTER`; `traj adapters list` shows the adapters.
 

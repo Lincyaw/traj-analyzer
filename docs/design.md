@@ -207,7 +207,7 @@ OPERATOR = Operator(
 | | | `tool_calls`、`tool_errors`：每个工具的调用次数和报错次数 | map |
 | `meta.fields` | code | 由参数 `fields` 决定，把指定的元数据字段复制为特征 | 按参数 |
 | `task.request_kinds` | llm | `request_kinds`：用户消息提出了哪几类请求 | set |
-| `user.dissatisfied` | llm | `user_dissatisfied`：用户是否写了对 assistant 不满意 | boolean |
+| `user.complains` | llm | `user_complains`：用户是否写了对 assistant 不满意 | boolean |
 | `user.corrects` | llm | `user_corrects`：用户是否指出 assistant 做错了 | boolean |
 | `user.follow_up` | llm | `user_follow_up`：用户是否在回答之后追加提问或请求 | boolean |
 | `user.approves` | llm | `user_approves`：用户是否认可了结果 | boolean |

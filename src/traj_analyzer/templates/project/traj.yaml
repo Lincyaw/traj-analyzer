@@ -20,7 +20,7 @@ operators:
   - use: stats.tool_usage
   - use: task.request_kinds
     call: dialogue
-  - use: user.dissatisfied
+  - use: user.complains
     call: dialogue
   - use: user.corrects
     call: dialogue

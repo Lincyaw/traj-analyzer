@@ -117,7 +117,7 @@ def test_operator_kind_must_match_its_functions() -> None:
 
 def test_library_operators_are_atomic() -> None:
     refs = discover(None)
-    assert {"stats.basic", "stats.tool_usage", "meta.fields", "task.request_kinds", "user.dissatisfied",
+    assert {"stats.basic", "stats.tool_usage", "meta.fields", "task.request_kinds", "user.complains",
             "user.corrects", "user.follow_up", "user.approves", "assistant.claims_done",
             "assistant.asks_user"} == set(refs)
     for name, ref in refs.items():

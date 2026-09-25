@@ -5,7 +5,7 @@ from traj_analyzer.operators.base import FeatureSpec, NoParams, Operator, has_us
 
 def outputs(params: NoParams) -> list[FeatureSpec]:
     return [FeatureSpec(
-        name="user_dissatisfied", type="boolean",
+        name="user_complains", type="boolean",
         description="A user message says the user is unhappy with the assistant or its work, e.g. 'this is wrong "
                     "again', 'you are not listening', 'still not working'.",
     )]
