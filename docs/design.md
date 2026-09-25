@@ -85,10 +85,33 @@ trajectory 的全局标识是 `<dataset>/<id>`，文档中称为 key。
 它支持的内容块类型是 `text`、`image`、`thinking`、`tool_use`、`tool_result` 和 `fallback`，其他类型会使读入过程报错终止。
 为空的 `thinking` 块不产生步骤。
 
-内置的 `messages` 适配器读取每条记录带一个 `{role, content}` 消息列表的数据。
-消息列表可以是 JSON 数组，也可以是 JSON 字符串。
-`role_map` 把每个源角色映射到统一的 `role` 和 `kind`，出现未映射的角色时读入过程报错终止。
-`tool_call_format` 指定 `tool_call` 消息的内容如何编码工具名，取值为 `text`、`json` 或 `python_literal`。
+内置的 `messages` 适配器读取每条记录带一个消息列表的数据，支持 OpenAI chat 格式、Anthropic messages 格式和 ShareGPT 格式。
+消息列表可以是 JSON 数组，也可以是 JSON 字符串，由 `messages_encoding` 指定。
+`role_key` 和 `content_key` 指定角色和内容的字段名，ShareGPT 格式使用 `from` 和 `value`。
+
+消息中各字段的解析方式：
+
+| 字段 | 产生的步骤 |
+|---|---|
+| `content` 为字符串 | 一个步骤，role 和 kind 由角色映射决定 |
+| `content` 为片段列表 | 相邻的文本片段合并为一个步骤；OpenAI 的 `text`、`refusal`、`image_url`、`input_audio`、`file` 片段，以及 Anthropic 的 `text`、`image`、`document`、`thinking`、`redacted_thinking`、`tool_use`、`tool_result` 块各自按类型转换 |
+| `tool_calls` | 每个调用一个 `tool_call` 步骤，arguments 为字符串或 JSON 对象 |
+| `function_call` | 一个 `tool_call` 步骤 |
+| `tool_call_id`、`tool_call_ids` | 按调用 id 找到对应的 `tool_call`，用它的工具名命名 `tool_result` 步骤 |
+| `name` | 工具结果消息没有调用 id 时，用作工具名 |
+| `reasoning_content`、`reasoning` | `include_thinking` 为 true 时产生一个 `thinking` 步骤 |
+| `refusal`、`audio` | 各产生一个带 `[refusal]` 或 `[audio]` 标记的步骤 |
+
+值为 null 的字段视为不存在。
+消息中出现上表之外的字段时读入过程报错终止，确认可以忽略的字段写入 `ignore_keys`。
+工具结果消息同时带 `name` 和调用 id 时，工具名取自调用 id 对应的调用，因为一些导出数据把 `name` 填成 `unknown_tool` 这样的占位值。
+Anthropic 块中的 `tool_result` 转换为 role 为 `tool` 的步骤，即使它出现在 user 消息中。
+
+`role_map` 在默认映射之上增加或覆盖角色映射。
+默认映射是：`system` 和 `developer` 映射到 system；`user` 和 `human` 映射到 user；`assistant` 和 `gpt` 映射到 assistant；`tool` 和 `function` 映射到 tool 的 `tool_result`。
+出现未映射的角色时读入过程报错终止。
+`tool_call_format` 指定 kind 为 `tool_call` 的消息内容如何编码工具名，取值为 `text`、`json` 或 `python_literal`。
+消息列表为 null 或为空的记录会使读入过程报错终止，`skip_empty` 为 true 时跳过这些记录。
 
 读入时遇到损坏的文件会报错终止，并给出文件路径和行号。
 需要跳过的文件写入该数据集的 `exclude` 列表。
@@ -414,6 +437,17 @@ instruction 要求向量长度等于输入中的 `n_chunks`。
 ### C. 测试数据
 
 测试使用真实数据：UltraChat 和 Toucan 两个公开数据集的样本，以及本仓库设计讨论的 Claude Code session 片段。
+`tests/data/messages/` 保存了六个公开数据集的样本，覆盖 `messages` 适配器支持的各种消息结构：
+
+| 文件 | 数据集 | 覆盖的结构 |
+|---|---|---|
+| `unified.jsonl` | ChrisDing1105/unified-agent-trajectories | `tool_calls`、`tool_call_id`、`reasoning_content`、对象形式的 arguments |
+| `openhands.jsonl` | SWE-Gym/OpenHands-Sampled-Trajectories | 值为 null 的字段、工具结果消息的 `name` |
+| `swesmith.jsonl` | SWE-bench/SWE-smith-trajectories | 片段列表形式的 content、`tool_call_ids`、需要 `ignore_keys` 的额外字段 |
+| `nlile.jsonl` | nlile/misc-merged-claude-code-traces-v1 | Anthropic 的 `text`、`tool_use`、`tool_result` 块 |
+| `mimo.jsonl` | choucsan/mimo-claude-code-traces-1k | 占位值 `unknown_tool` 的工具名 |
+| `hermes.jsonl` | NousResearch/hermes-function-calling-v1 | ShareGPT 的 `from` 和 `value` |
+
 session 片段不包含 `attachment` 记录，因为这些记录保存了用户的环境信息。
 `tests/data/replay/` 保存了在三条 Toucan trajectory 上真实调用模型得到的 aifn 事件记录和提交结果，按渲染文件的内容哈希命名。
 `tests/data/operators/fixture/outcome.py` 的输出与这些记录一致，测试通过 aifn 的 `ReplayEngine` 重放记录，覆盖从提交任务、worker 执行、输出校验到写入特征表的完整路径。
