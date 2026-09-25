@@ -77,8 +77,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
 
 
 def _frame(project: Project, datasets: list[str] | None, groups: list[str] | None = None) -> Frame:
-    keys = [row.key for row in load_index(project, datasets)]
-    return build_frame(project, load_groups(project, groups), keys,
+    return build_frame(project, load_groups(project, groups), load_index(project, datasets),
                        project.config.sampling.vector_length)
 
 
@@ -93,6 +92,7 @@ def cmd_discover(args: argparse.Namespace) -> None:
         if not frame.columns:
             raise ConfigError(f"Group {args.group} has no extracted values; "
                               f"run `traj extract --group {args.group}` first")
+        frame = frame.complete(list(frame.columns))
         x = frame.matrix(dict.fromkeys(frame.columns, 1.0))
         position = {row.key: row for row in rows}
         keys = list(frame.query.index)
@@ -135,9 +135,14 @@ def cmd_sample(args: argparse.Namespace) -> None:
     if args.budget:
         spec = spec.model_copy(update={"budget": args.budget})
     frame = _frame(project, spec.datasets)
-    picks = [enrich(project, p, frame) for p in sample(spec, frame, load_groups(project))]
-    path = save(project, spec, picks, len(frame.query))
-    _emit({"selection": str(path), "population": len(frame.query), "picks": picks})
+    result = sample(spec, frame, load_groups(project))
+    selection = {
+        "population": result.population,
+        "strategies": [report.model_dump() for report in result.strategies],
+        "picks": [enrich(project, p, frame) for p in result.picks],
+    }
+    path = save(project, spec, selection)
+    _emit({"selection": str(path), **selection})
 
 
 def cmd_show(args: argparse.Namespace) -> None:
@@ -159,17 +164,21 @@ def cmd_show(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     project = Project.find()
+    index = load_index(project)
+    shas = {row.key: row.sha256 for row in index}
     datasets: dict[str, int] = {}
-    for row in load_index(project):
+    for row in index:
         datasets[row.dataset] = datasets.get(row.dataset, 0) + 1
     groups = {}
     for group in load_groups(project):
         digest = group.spec_hash()
         stored = read_group(project, group.group)
-        current = {r.key for r in stored if r.spec_hash == digest and r.status == "ok"}
-        problems = {r.key for r in stored if r.spec_hash == digest and r.status != "ok"}
-        stale = {r.key for r in stored if r.spec_hash != digest} - current - problems
-        groups[group.group] = {"ok": len(current), "not_ok": len(problems), "stale": len(stale)}
+        fresh = [r for r in stored if r.spec_hash == digest and shas.get(r.key) == r.sha256]
+        current = {r.key for r in fresh if r.status == "ok"}
+        problems = {r.key for r in fresh if r.status != "ok"}
+        stale = {r.key for r in stored if r.key in shas} - current - problems
+        groups[group.group] = {"ok": len(current), "not_ok": len(problems), "stale": len(stale),
+                               "missing": len(shas) - len(current | problems | stale)}
     _emit({"project": str(project.root), "datasets": datasets, "groups": groups})
 
 

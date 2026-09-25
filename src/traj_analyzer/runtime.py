@@ -60,11 +60,16 @@ def engine_env(project: Project) -> dict[str, str]:
 def make_worker(worker_id: str) -> Worker:
     """Factory for `python -m aifn worker traj_analyzer.runtime:make_worker`."""
     project = Project.find()
+    config = project.config.engine
+    patches = tuple((project.root / Path(p).expanduser()).resolve() for p in config.patches)
+    missing = [str(p) for p in patches if not p.is_file()]
+    if missing:
+        raise ConfigError(f"engine.patches files do not exist: {missing}")
     return Worker(
         mailbox=mailbox(project),
         registry=registry(project),
-        engine=DeepSeekEngine(dsh_home=Path(project.config.engine.dsh_home).expanduser(),
-                              env=engine_env(project)),
+        engine=DeepSeekEngine(dsh_home=Path(config.dsh_home).expanduser(), env=engine_env(project),
+                              patches=patches),
         policy=policy(project),
         id=worker_id,
     )

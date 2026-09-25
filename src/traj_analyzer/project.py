@@ -38,6 +38,7 @@ class EngineConfig(_Strict):
     max_tokens: int = 32768
     reasoning_effort: str | None = None
     env_passthrough: list[str] = Field(default_factory=lambda: ["DEEPSEEK_API_KEY"])
+    patches: list[str] = Field(default_factory=list)
 
 
 class ExtractConfig(_Strict):

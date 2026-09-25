@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 import yaml
+from aifn import Worker
+from aifn.engines import ReplayEngine
 from pydantic import ValidationError
 
 from traj_analyzer.adapters.claude_code import ClaudeCodeAdapter
@@ -15,10 +18,12 @@ from traj_analyzer.extract import extract
 from traj_analyzer.features.spec import GroupSpec, load_groups, output_model
 from traj_analyzer.ingest import ingest, load_index, render_markdown
 from traj_analyzer.project import Project, RenderConfig
+from traj_analyzer.runtime import mailbox, policy, registry
 from traj_analyzer.sampling import expand_where, load_sampler, sample
 from traj_analyzer.vectorize import build_frame
 
 DATA = Path(__file__).parent / "data"
+REPLAY = DATA / "replay"
 SESSION = next((DATA / "claude_code").glob("*.jsonl"))
 TOUCAN = {
     "adapter": "messages",
@@ -61,6 +66,8 @@ def test_claude_code_adapter_reads_real_session() -> None:
     calls = [s.name for s in trajectory.steps if s.kind == "tool_call"]
     results = [s.name for s in trajectory.steps if s.kind == "tool_result"]
     assert results == calls[: len(results)]
+    notifications = [s for s in trajectory.steps if s.content.lstrip().startswith("<task-notification>")]
+    assert notifications and all(s.role == "system" for s in notifications)
 
 
 def test_claude_code_adapter_fails_on_a_corrupt_line(tmp_path: Path) -> None:
@@ -142,19 +149,34 @@ def test_sampling_over_builtin_features(project: Project) -> None:
     (report,) = extract(project, groups=["stats"])
     assert report.ok == 70
     groups = load_groups(project, ["stats"])
-    keys = [row.key for row in load_index(project)]
-    frame = build_frame(project, groups, keys, vector_length=5)
+    frame = build_frame(project, groups, load_index(project), vector_length=5)
     assert {"n_steps", "n_tool_calls", "tools_used__count"} <= set(frame.query.columns)
 
     spec = load_sampler(project, "default").model_copy(update={"budget": 12})
     spec.strategies.insert(0, spec.strategies[0].model_copy(update={
         "kind": "target", "label": "busy", "quota": 4,
         "where": "n_tool_calls >= {n_tool_calls.many}", "within": "top:n_tool_calls"}))
-    picks = sample(spec, frame, groups)
+    result = sample(spec, frame, groups)
+    picks = result.picks
+    assert result.population == 70
     assert len(picks) == 12 and len({p.key for p in picks}) == 12
     busy = [p for p in picks if p.strategy == "busy"]
     assert len(busy) == 4 and all(p.reason["n_tool_calls"] >= 4 for p in busy)
     assert {p.strategy for p in picks} == {"busy", "outlier", "diverse"}
+    (busy_report, *_) = result.strategies
+    assert busy_report.matched == int((frame.query["n_tool_calls"] >= 4).sum())
+
+
+def test_complete_population_excludes_missing_features(project: Project, tmp_path: Path) -> None:
+    extract(project, groups=["stats"])
+    keys = [row.key for row in load_index(project) if row.sha256 in {p.name for p in REPLAY.iterdir()}]
+    extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "replay"))
+    groups = load_groups(project)
+    frame = build_frame(project, groups, load_index(project), vector_length=4)
+    spec = load_sampler(project, "default").model_copy(update={
+        "budget": 3, "features": ["frustration", "n_steps"]})
+    assert sample(spec, frame, groups).population == len(keys)
+    assert sample(spec.model_copy(update={"population": "all"}), frame, groups).population == 70
 
 
 def test_cli_discover_and_sample(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
@@ -167,6 +189,58 @@ def test_cli_discover_and_sample(project: Project, capsys: pytest.CaptureFixture
     assert main(["sample", "--budget", "6"]) == 0
     selection = json.loads(capsys.readouterr().out)
     assert len(selection["picks"]) == 6 and Path(selection["selection"]).is_file()
+
+
+class ReplayWorkers:
+    """Answer every pending call with a transcript recorded from a real model run on the same trajectory."""
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def check(self, project: Project) -> None:
+        pass
+
+    def run(self, project: Project, count: int) -> None:
+        box = mailbox(project)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        for call in box.pending():
+            shutil.copytree(REPLAY / str(call.request["sha256"]), self.directory / call.id)
+        Worker(mailbox=box, registry=registry(project), engine=ReplayEngine(self.directory),
+               policy=policy(project), id="replay").work()
+
+
+def test_llm_extraction_replays_real_runs(project: Project, tmp_path: Path) -> None:
+    recorded = sorted(p.name for p in REPLAY.iterdir())
+    rows = [row for row in load_index(project, ["toucan"]) if row.sha256 in recorded]
+    assert len(rows) == len(recorded)
+    keys = [row.key for row in rows]
+    (report,) = extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "replay"))
+    assert (report.ok, report.failed, report.refused, report.pending) == (len(keys), 0, 0, 0)
+
+    (again,) = extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "unused"))
+    assert again.cached == len(keys)
+
+    groups = load_groups(project, ["outcome"])
+    frame = build_frame(project, groups, rows, vector_length=4)
+    assert frame.query["frustration"].between(0, 1).all()
+    assert set(frame.query["task_type"]) <= set(OUTCOME["features"][0]["labels"])
+    assert {"curve__t3", "time_split__tools"} <= set(frame.distance.columns)
+    for key in keys:
+        assert main(["show", key]) == 0
+
+
+def test_changed_content_makes_features_stale(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
+    extract(project, groups=["stats"])
+    config = yaml.safe_load((project.root / "traj.yaml").read_text(encoding="utf-8"))
+    config["render"]["max_step_chars"] = 200
+    (project.root / "traj.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    ingest(Project.load(project.root), ["toucan"])
+    capsys.readouterr()
+    assert main(["status"]) == 0
+    stats = json.loads(capsys.readouterr().out)["groups"]["stats"]
+    assert (stats["ok"], stats["stale"]) == (40, 30)
+    frame = build_frame(project, load_groups(project, ["stats"]), load_index(project), vector_length=4)
+    assert len(frame.complete(["n_steps"]).query) == 40
 
 
 def test_threshold_expansion() -> None:

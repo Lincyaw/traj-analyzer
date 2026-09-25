@@ -22,6 +22,7 @@ engine:
   provider: deepseek-official
   reasoning_effort: null
   env_passthrough: [DEEPSEEK_API_KEY]
+  patches: []
 
 extract:
   workers: 4

@@ -19,6 +19,8 @@ class FeatureRow(BaseModel):
     status: Status = "ok"
     detail: str | None = None
     spec_hash: str
+    sha256: str
+    """Content hash of the rendered trajectory the value was computed from."""
 
 
 def write_group(project: Project, group: str, rows: Iterable[FeatureRow]) -> int:

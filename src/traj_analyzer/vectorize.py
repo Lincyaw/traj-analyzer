@@ -8,6 +8,7 @@ import pandas as pd
 
 from traj_analyzer.features.spec import FeatureSpec, GroupSpec
 from traj_analyzer.features.table import read_group
+from traj_analyzer.ingest import IndexRow
 from traj_analyzer.project import ConfigError, Project
 
 MAX_FREE_LABELS = 30
@@ -18,12 +19,27 @@ class Frame:
     """Two views of the feature table, both indexed by trajectory key.
 
     `query` holds readable columns for filtering, and `distance` holds numeric columns for clustering.
-    `columns` maps each feature to its columns in `distance`.
+    `columns` maps each feature to its columns in `distance`, and `extracted` to the keys it was extracted for.
     """
 
     query: pd.DataFrame
     distance: pd.DataFrame
     columns: dict[str, list[str]] = field(default_factory=dict)
+    extracted: dict[str, set[str]] = field(default_factory=dict)
+
+    def complete(self, features: list[str]) -> Frame:
+        """Keep the trajectories extracted under the current definition of every one of `features`.
+
+        A feature whose value is empty for a trajectory, such as a tool error rate without tool results, still counts.
+        """
+        unknown = sorted(set(features) - set(self.columns))
+        if unknown:
+            raise ConfigError(f"No extracted values for features {unknown}")
+        mask = pd.Series(True, index=self.distance.index)
+        for feature in features:
+            mask &= self.distance.index.isin(list(self.extracted[feature]))
+        return Frame(query=self.query[mask], distance=self.distance[mask], columns=self.columns,
+                     extracted=self.extracted)
 
     def matrix(self, weights: dict[str, float]) -> np.ndarray:
         """Standardize every column, fill missing values with the column mean, and apply weights.
@@ -55,17 +71,20 @@ def ident(label: str) -> str:
 
 
 def build_frame(
-    project: Project, specs: list[GroupSpec], keys: list[str], vector_length: int
+    project: Project, specs: list[GroupSpec], trajectories: list[IndexRow], vector_length: int
 ) -> Frame:
+    """Use only values computed under the current feature definition from the current trajectory content."""
     query: dict[str, pd.Series] = {}
     distance: dict[str, pd.Series] = {}
     columns: dict[str, list[str]] = {}
-    index = pd.Index(keys, name="key")
+    extracted: dict[str, set[str]] = {}
+    shas = {t.key: t.sha256 for t in trajectories}
+    index = pd.Index(list(shas), name="key")
     for spec in specs:
         digest = spec.spec_hash()
         values: dict[str, dict[str, object]] = {f.name: {} for f in spec.features}
         for row in read_group(project, spec.group):
-            if row.status == "ok" and row.spec_hash == digest:
+            if row.status == "ok" and row.spec_hash == digest and shas.get(row.key) == row.sha256:
                 values[row.feature][row.key] = row.value
         for feature in spec.features:
             if not values[feature.name]:
@@ -74,10 +93,12 @@ def build_frame(
             query.update(q)
             distance.update(d)
             columns[feature.name] = list(d)
+            extracted[feature.name] = set(values[feature.name])
     return Frame(
         query=pd.DataFrame(query, index=index),
         distance=pd.DataFrame(distance, index=index),
         columns=columns,
+        extracted=extracted,
     )
 
 

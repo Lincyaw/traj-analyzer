@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from traj_analyzer.schema import Step, Trajectory
+from traj_analyzer.schema import Role, Step, Trajectory
+
+_LOCAL_COMMAND = re.compile(
+    r"\s*<(command-name|command-message|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr)>"
+)
 
 
 class ClaudeCodeAdapter:
     """Claude Code session files, `~/.claude/projects/<project>/<session>.jsonl`.
 
     Conversation records are read in file order, so turns abandoned by a rewind stay in the trajectory.
+    User records not typed by a person, such as task notifications and local commands, become system steps.
     """
 
     def __init__(
@@ -50,7 +56,10 @@ class ClaudeCodeAdapter:
                 message = record["message"]
                 if kind == "assistant":
                     metadata.setdefault("model", message["model"])
-                for step in self._steps(kind, message["content"], record["timestamp"], tool_names):
+                speaker = kind
+                if kind == "user" and record.get("origin") is not None and record["origin"]["kind"] != "human":
+                    speaker = "system"
+                for step in self._steps(speaker, message["content"], record["timestamp"], tool_names):
                     steps.append(step.model_copy(update={"index": len(steps)}))
         user_turns = sum(1 for s in steps if s.role == "user" and s.kind == "message")
         if user_turns < self.min_user_turns:
@@ -63,12 +72,12 @@ class ClaudeCodeAdapter:
         self, kind: str, content: Any, timestamp: str, tool_names: dict[str, str]
     ) -> Iterator[Step]:
         if isinstance(content, str):
-            yield Step(index=0, role=kind, content=content, timestamp=timestamp)  # type: ignore[arg-type]
+            yield Step(index=0, role=_text_role(kind, content), content=content, timestamp=timestamp)
             return
         for block in content:
             match block["type"]:
                 case "text":
-                    yield Step(index=0, role=kind, content=block["text"],  # type: ignore[arg-type]
+                    yield Step(index=0, role=_text_role(kind, block["text"]), content=block["text"],
                                timestamp=timestamp)
                 case "image":
                     yield Step(index=0, role=kind, content="[image]",  # type: ignore[arg-type]
@@ -95,6 +104,13 @@ class ClaudeCodeAdapter:
                                timestamp=timestamp)
                 case other:
                     raise ValueError(f"Unknown Claude Code content block type: {other}")
+
+
+def _text_role(speaker: str, text: str) -> Role:
+    """Local slash commands and `!` shell commands are recorded as user text but are not typed prose."""
+    if speaker == "user" and _LOCAL_COMMAND.match(text):
+        return "system"
+    return speaker  # type: ignore[return-value]
 
 
 def _result_text(content: Any) -> str:

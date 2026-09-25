@@ -79,6 +79,8 @@ trajectory 的全局标识是 `<dataset>/<id>`，文档中称为 key。
 
 内置的 `claude_code` 适配器读取 Claude Code session 文件。
 它按文件顺序读取 `user` 和 `assistant` 记录，所以通过回退放弃的对话轮次也保留在 trajectory 中。
+`origin.kind` 不是 `human` 的 user 记录，例如后台任务通知，转换为 `system` 步骤。
+以 `<command-name>`、`<local-command-stdout>`、`<bash-input>` 等标签开头的 user 文本是本地命令的记录，同样转换为 `system` 步骤。
 它支持的内容块类型是 `text`、`image`、`thinking`、`tool_use`、`tool_result` 和 `fallback`，其他类型会使读入过程报错终止。
 为空的 `thinking` 块不产生步骤。
 
@@ -166,16 +168,49 @@ features:
 
 `traj extract` 按以下步骤执行：
 
-1. 为每条 trajectory 和每个 LLM 特征组向 mailbox 提交任务，已有结论的任务直接复用。
-2. 存在未完成的任务时，检查 `engine.env_passthrough` 中的环境变量，然后启动 `extract.workers` 个 `python -m aifn worker traj_analyzer.runtime:make_worker --once` 子进程。
+1. 检查 `engine.env_passthrough` 中的环境变量是否都已设置，缺少时报错终止。
+   然后为每条 trajectory 和每个 LLM 特征组向 mailbox 提交任务，已有结论的任务直接复用。
+2. 存在未完成的任务时，启动 `extract.workers` 个 `python -m aifn worker traj_analyzer.runtime:make_worker --once` 子进程。
    worker 通过环境变量 `TRAJ_PROJECT` 找到项目，并由同一份 YAML 构建相同的函数表。
    队列清空后 worker 退出，任何 worker 以非零状态码退出时命令报错终止。
-3. 读取全部结论，写入 `.traj/features/<group>.jsonl`，每行是 `{key, group, feature, value, evidence, status, detail, spec_hash}`。
+3. 读取全部结论，写入 `.traj/features/<group>.jsonl`，每行是 `{key, group, feature, value, evidence, status, detail, spec_hash, sha256}`。
+   `spec_hash` 是特征组定义的哈希，`sha256` 是计算时渲染文件的内容哈希。
    拒答写为 `refused`，执行失败写为 `failed`，逐片向量长度与分片数不一致写为 `invalid_length`。
 
 `--dry-run` 只查询缓存，不向 mailbox 写入任务。
+worker 每次运行都会处理 mailbox 中全部未完成的任务，包括之前中断的运行留下的任务。
 
-### 5.5 特征发现
+### 5.5 模型配置
+
+`traj.yaml` 的 `engine` 段决定 LLM 特征由哪个模型计算：
+
+| 字段 | 作用 |
+|---|---|
+| `dsh_home` | 安装了 aifn harness bundle 的 dsh home |
+| `provider`、`model` | dsh 中的 provider 名和模型名，特征组可以用 `model` 字段覆盖模型名 |
+| `max_tokens`、`reasoning_effort` | 传给模型的生成参数 |
+| `env_passthrough` | 传给 dsh 运行时的环境变量名，通常是 API key |
+| `patches` | 相对项目根目录的 dsh patch 文件列表，用于添加 provider 路由 |
+
+通过 OpenAI 兼容接口访问模型时，在 patch 中配置 `sdk` profile 的 `llm-pi-ai` 行：
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      litellm:
+        displayName: LiteLLM proxy
+        apiKeyEnv: LITELLM_API_KEY
+        api: openai-completions
+        baseURL: http://host:port/v1
+        models:
+          - id: DeepSeek-V4-flash
+            contextWindow: 262144
+```
+
+对应的 `engine` 配置是 `provider: litellm`、`model: DeepSeek-V4-flash`、`env_passthrough: [LITELLM_API_KEY]`、`patches: [engine/litellm.patch.yml]`。
+
+### 5.6 特征发现
 
 `traj discover` 默认在 `stats` 组的特征上做 KMeans 聚类，从每个簇中取离中心最近的 trajectory，并输出渲染文件路径和所在簇的大小。
 使用 `--method random` 时随机抽取。
@@ -196,7 +231,8 @@ features:
 | vector | `name__max`、`__min`、`__mean`、`__first`、`__last` | 重采样到 `sampling.vector_length` 个点，加上五个聚合列 |
 | distribution | 每个标签一列概率 | 同左 |
 
-只有状态为 `ok` 且 `spec_hash` 与当前定义一致的特征值进入宽表。
+只有状态为 `ok`、`spec_hash` 与当前定义一致、`sha256` 与当前渲染文件一致的特征值进入宽表。
+`traj status` 按同样的条件统计每个特征组：`ok` 和 `not_ok` 是按当前定义和当前内容计算的结果，`stale` 是定义或内容变化后需要重算的数量，`missing` 是从未计算的数量。
 距离列先做标准化，缺失值填为该列均值。
 每个特征的权重除以其列数的平方根，使列数多的特征不会主导距离。
 
@@ -223,6 +259,8 @@ strategies:
 ```
 
 `features` 可以是 `all`、特征名列表，或者特征名到权重的映射。
+`population` 默认为 `complete`，只在所有采样特征都已按当前定义和当前内容计算的 trajectory 中采样；值为空的特征，例如没有工具结果时的 `tool_error_rate`，也算作已计算。
+`population: all` 在全部 trajectory 中采样。
 `quota` 可以是 0 到 1 之间的比例、整数或 `rest`。
 策略按列表顺序执行，已入选的 trajectory 不会再次入选。
 
@@ -234,7 +272,9 @@ strategies:
 | `random` | 随机抽取 | 无 |
 
 `within` 取值为 `diversity`、`random`、`top:<列名>` 或 `bottom:<列名>`。
-采样结果写入 `selection.json` 并打印到 stdout，每条包含 key、渲染文件路径、策略、入选原因和该条 trajectory 的全部查询列。
+采样结果写入 `selection.json` 并打印到 stdout。
+结果包含采样总体的大小、每个策略的配额、实际入选数和 target 策略的命中数，以及入选列表。
+入选列表中每条包含 key、渲染文件路径、策略、入选原因和该条 trajectory 的全部查询列。
 
 ## 7. 报告与反馈
 
@@ -279,3 +319,5 @@ instruction 要求向量长度等于输入中的 `n_chunks`。
 
 测试使用真实数据：UltraChat 和 Toucan 两个公开数据集的样本，以及本仓库设计讨论的 Claude Code session 片段。
 session 片段不包含 `attachment` 记录，因为这些记录保存了用户的环境信息。
+`tests/data/replay/` 保存了在三条 Toucan trajectory 上真实调用模型得到的 aifn 事件记录和提交结果，按渲染文件的内容哈希命名。
+测试通过 aifn 的 `ReplayEngine` 重放这些记录，覆盖从提交任务、worker 执行、输出校验到写入特征表的完整路径。

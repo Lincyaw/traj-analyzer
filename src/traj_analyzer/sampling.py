@@ -37,6 +37,8 @@ class SamplerSpec(BaseModel):
     seed: int = 0
     datasets: list[str] | None = None
     features: Literal["all"] | list[str] | dict[str, float] = "all"
+    population: Literal["complete", "all"] = "complete"
+    """`complete` samples only trajectories with values for every sampler feature."""
     strategies: list[StrategySpec] = Field(min_length=1)
 
 
@@ -44,6 +46,20 @@ class Pick(BaseModel):
     key: str
     strategy: str
     reason: dict[str, Any]
+
+
+class StrategyReport(BaseModel):
+    label: str
+    kind: str
+    quota: int
+    picked: int
+    matched: int | None = None
+
+
+class Sampling(BaseModel):
+    population: int
+    strategies: list[StrategyReport]
+    picks: list[Pick]
 
 
 def load_sampler(project: Project, name: str) -> SamplerSpec:
@@ -58,26 +74,34 @@ def weights_for(spec: SamplerSpec, frame: Frame) -> dict[str, float]:
     return dict(spec.features)
 
 
-def sample(spec: SamplerSpec, frame: Frame, groups: list[GroupSpec]) -> list[Pick]:
+def sample(spec: SamplerSpec, frame: Frame, groups: list[GroupSpec]) -> Sampling:
     """Run the strategies in order; each one takes its quota from what earlier ones left."""
+    weights = weights_for(spec, frame)
+    if spec.population == "complete":
+        frame = frame.complete([feature for feature, weight in weights.items() if weight])
     rng = np.random.default_rng(spec.seed)
     keys = list(frame.query.index)
-    x = frame.matrix(weights_for(spec, frame))
+    x = frame.matrix(weights)
     thresholds = {f.name: f.thresholds for g in groups for f in g.features}
     picks: list[Pick] = []
+    reports: list[StrategyReport] = []
     chosen: set[str] = set()
     left = spec.budget
     for n, strategy in enumerate(spec.strategies):
         quota = _quota(strategy.quota, spec.budget, left)
-        if quota == 0:
-            continue
         label = strategy.label or f"{strategy.kind}-{n}"
+        matched = None
+        if strategy.kind == "target":
+            matched = _matches(strategy, label, frame.query, thresholds)
         free = [i for i, k in enumerate(keys) if k not in chosen]
-        new = _run(strategy, label, quota, free, keys, x, frame.query, thresholds, rng, spec.seed)
+        new = [] if quota == 0 else _run(strategy, label, quota, free, keys, x, frame.query, matched, rng,
+                                         spec.seed)
         chosen.update(pick.key for pick in new)
         picks += new
         left -= len(new)
-    return picks
+        reports.append(StrategyReport(label=label, kind=strategy.kind, quota=quota, picked=len(new),
+                                      matched=None if matched is None else len(matched)))
+    return Sampling(population=len(keys), strategies=reports, picks=picks)
 
 
 def _quota(quota: float | int | str, budget: int, left: int) -> int:
@@ -92,8 +116,7 @@ def _quota(quota: float | int | str, budget: int, left: int) -> int:
 
 def _run(
     strategy: StrategySpec, label: str, quota: int, free: list[int], keys: list[str],
-    x: np.ndarray, query: pd.DataFrame, thresholds: dict[str, dict[str, float]],
-    rng: np.random.Generator, seed: int,
+    x: np.ndarray, query: pd.DataFrame, matched: set[str] | None, rng: np.random.Generator, seed: int,
 ) -> list[Pick]:
     match strategy.kind:
         case "random":
@@ -104,7 +127,8 @@ def _run(
         case "outlier":
             return _outliers(strategy, label, quota, free, keys, x, seed)
         case "target":
-            return _target(strategy, label, quota, free, keys, x, query, thresholds, rng, seed)
+            assert matched is not None
+            return _target(strategy, label, quota, free, keys, x, query, matched, rng, seed)
     raise AssertionError(strategy.kind)
 
 
@@ -176,19 +200,22 @@ def expand_where(where: str, thresholds: dict[str, dict[str, float]]) -> str:
     return _THRESHOLD.sub(replace, where)
 
 
-def _target(
-    strategy: StrategySpec, label: str, quota: int, free: list[int], keys: list[str],
-    x: np.ndarray, query: pd.DataFrame, thresholds: dict[str, dict[str, float]],
-    rng: np.random.Generator, seed: int,
-) -> list[Pick]:
+def _matches(
+    strategy: StrategySpec, label: str, query: pd.DataFrame, thresholds: dict[str, dict[str, float]]
+) -> set[str]:
     if not strategy.where:
         raise ConfigError(f"{label}: a target strategy needs where")
-    where = expand_where(strategy.where, thresholds)
-    matched = set(query.query(where, engine="python").index)
+    return set(query.query(expand_where(strategy.where, thresholds), engine="python").index)
+
+
+def _target(
+    strategy: StrategySpec, label: str, quota: int, free: list[int], keys: list[str],
+    x: np.ndarray, query: pd.DataFrame, matched: set[str], rng: np.random.Generator, seed: int,
+) -> list[Pick]:
     position = {k: i for i, k in enumerate(keys)}
     subset = sorted(position[k] for k in matched)
     candidates = [i for i in free if keys[i] in matched]
-    extra = {"where": where, "matched": len(matched)}
+    extra = {"where": strategy.where, "matched": len(matched)}
     if strategy.within == "diversity":
         return diverse(label, quota, candidates, keys, x, seed, population=subset, extra=extra)
     if strategy.within == "random":
@@ -219,12 +246,11 @@ def enrich(project: Project, pick: Pick, frame: Frame) -> dict[str, Any]:
             "features": features}
 
 
-def save(project: Project, spec: SamplerSpec, picks: list[dict[str, Any]], population: int) -> Path:
+def save(project: Project, spec: SamplerSpec, selection: dict[str, Any]) -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out = project.samples_dir / spec.name / stamp
     out.mkdir(parents=True)
     path = out / "selection.json"
-    path.write_text(json.dumps({
-        "sampler": spec.model_dump(), "population": population, "picks": picks,
-    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    path.write_text(json.dumps({"sampler": spec.model_dump(), **selection}, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
     return path
