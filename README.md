@@ -1,11 +1,11 @@
 # traj-analyzer
 
-traj-analyzer 对一批任意格式的 LLM trajectory 做批量分析。
-它用可以选择启用的算子把每条 trajectory 转换成数值特征，采样出最值得阅读的少量样本，再由 Claude Code 阅读样本并撰写报告。
-一个算子是一个 Python 文件，内置算子库在 `src/traj_analyzer/operators/library/`，分析项目可以在自己的 `operators/` 中添加算子。
-设计见 [docs/design.md](docs/design.md)。
+traj-analyzer analyses batches of LLM trajectories in any format.
+Operators you choose to enable turn each trajectory into features, a sampler picks the few trajectories most worth reading, and Claude Code reads them and writes a report.
+An operator is one Python file; the built-in library lives in `src/traj_analyzer/operators/library/`, and an analysis project adds its own in `operators/`.
+The design is in [docs/design.md](docs/design.md).
 
-## 安装
+## Install
 
 ```sh
 uv sync
@@ -13,9 +13,9 @@ uv run python -m aifn install --dsh-home ~/.dsh
 export DEEPSEEK_API_KEY=...
 ```
 
-第二条命令把 aifn 的 harness bundle 安装到 dsh home，LLM 特征提取通过它执行。
+The second command installs the aifn harness bundle into the dsh home, which runs LLM feature extraction.
 
-## 使用
+## Usage
 
 ```sh
 traj init ~/analysis/cc-sessions
@@ -30,14 +30,14 @@ traj extract --group dialogue --limit 5
 traj sample
 ```
 
-`traj init` 生成的 `traj.yaml` 已经启用了内置算子库中的全部通用算子，七个 llm 算子共用 `dialogue` 调用组。
-新数据源和新特征都以文件的形式加入：适配器放在项目的 `adapters/`，算子放在项目的 `operators/`，详见设计文档的“扩展点”一节。
-项目还包含三个 skill：`traj-features` 说明特征怎样设定和提取，`traj-discover` 用来阅读样本并启用或编写算子，`traj-report` 用来撰写报告。
+The `traj.yaml` created by `traj init` enables every general operator of the built-in library, and the seven LLM operators share the `dialogue` call group.
+New data sources and new features are added as files: adapters in the project's `adapters/`, operators in the project's `operators/`, as the "Extension points" section of the design describes.
+The project also carries three skills: `traj-features` explains how features are defined and extracted, `traj-discover` reads samples and enables or writes operators, and `traj-report` writes reports.
 
-所有命令都向 stdout 输出 JSON。
-退出码：0 表示成功，1 表示运行错误，2 表示用法或配置错误。
+Every command prints JSON to stdout.
+Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 
-## 开发
+## Development
 
 ```sh
 uv run pytest

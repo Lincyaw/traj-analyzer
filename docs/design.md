@@ -1,171 +1,171 @@
-# traj-analyzer 设计文档
+# traj-analyzer design
 
-## 1. 目标
+## 1. Goal
 
-traj-analyzer 对一批任意格式的 LLM trajectory 做批量分析。
-它用一组可以选择启用的算子把每条 trajectory 转换成数值特征，在特征空间上采样出少量最值得阅读的 trajectory，再由 Claude Code 阅读这些样本并撰写 insight 报告。
+traj-analyzer analyses batches of LLM trajectories in any format.
+A set of enabled operators turns each trajectory into features, a sampler picks the few trajectories most worth reading in that feature space, and Claude Code reads them and writes an insight report.
 
-使用者包括人和 agent。
-所有命令都以非交互方式执行，stdout 只输出一个 JSON 文档，日志写到 stderr。
+Both people and agents use it.
+Every command runs non-interactively, prints one JSON document to stdout, and writes logs to stderr.
 
-## 2. 总体流程
+## 2. Overall flow
 
 ```mermaid
 flowchart TD
-    raw[原始文件] -->|adapter| unified[统一 Trajectory]
-    unified -->|render 与 chunk| md["&lt;id&gt;.md，带步号和分片标记"]
-    library[内置算子库与项目 operators/] -->|traj operators enable| config["traj.yaml 的 operators 列表"]
-    md -->|traj discover| propose[Claude Code 阅读样本，启用或编写算子]
+    raw[Raw files] -->|adapter| unified[Unified Trajectory]
+    unified -->|render and chunk| md["&lt;id&gt;.md with step numbers and chunk markers"]
+    library[Built-in library and project operators/] -->|traj operators enable| config["operators list in traj.yaml"]
+    md -->|traj discover| propose[Claude Code reads samples, enables or writes operators]
     propose --> config
-    config -->|traj extract| table[特征表，每个执行组一个文件]
+    config -->|traj extract| table[Feature table, one file per execution group]
     md -->|traj extract| table
-    table -->|vectorize| frame[宽表与距离矩阵]
-    frame -->|traj sample| picks[入选列表，每条带入选原因]
-    picks --> report["Claude Code 阅读样本，写入 reports/*.md"]
-    report -->|修改算子与配置并提交| config
+    table -->|vectorize| frame[Wide table and distance matrix]
+    frame -->|traj sample| picks[Picks, each with the reason it was chosen]
+    picks --> report["Claude Code reads the picks and writes reports/*.md"]
+    report -->|revise operators and config, commit| config
 ```
 
-工作分为两层：
+The work splits into two layers:
 
-| 层 | 负责的工作 | 形式 |
+| Layer | Responsibility | Form |
 |---|---|---|
-| `traj` CLI | 读入、渲染、分片、算子管理、特征提取调度、存储、向量化、采样 | Python 包，执行过程确定 |
-| Claude Code skill | 特征发现、编写算子、阅读样本、撰写报告、把反馈写回算子与配置 | 分析项目中的 `.claude/skills/` |
+| `traj` CLI | ingest, render, chunk, manage operators, schedule extraction, store, vectorize, sample | Python package with deterministic steps |
+| Claude Code skills | discover features, write operators, read samples, write reports, feed findings back into operators and config | `.claude/skills/` of an analysis project |
 
-## 3. 分析项目
+## 3. Analysis project
 
-工具仓库和分析项目相互独立。
-分析项目是一个 git 仓库，由 `traj init <dir>` 生成，包含以下内容：
+The tool repository and analysis projects are separate.
+An analysis project is a git repository created by `traj init <dir>`:
 
-| 路径 | 内容 | 是否进入 git |
+| Path | Content | In git |
 |---|---|---|
-| `traj.yaml` | 数据集、启用的算子、调用组、渲染、engine、提取并发 | 是 |
-| `operators/**/*.py` | 项目自带的算子，每个文件一个算子 | 是 |
-| `samplers/<name>.yaml` | 采样策略 | 是 |
-| `adapters/*.py` | 项目自带的适配器 | 是 |
-| `reports/*.md` | Claude Code 撰写的报告 | 是 |
-| `.claude/skills/` | `traj-features`、`traj-discover` 和 `traj-report` 三个 skill | 是 |
-| `.traj/datasets/<dataset>/` | `<id>.json`、`<id>.md`、`index.jsonl` | 否 |
-| `.traj/instructions/` | 由调用组生成的 instruction 文件 | 否 |
-| `.traj/mailbox/` | aifn 的任务与结论，同时作为缓存 | 否 |
-| `.traj/features/<group>.jsonl` | 特征表 | 否 |
-| `.traj/samples/<sampler>/<run>/selection.json` | 采样结果 | 否 |
+| `traj.yaml` | datasets, enabled operators, call groups, rendering, engine, extraction concurrency | yes |
+| `operators/**/*.py` | project operators, one per file | yes |
+| `samplers/<name>.yaml` | sampling strategies | yes |
+| `adapters/*.py` | project adapters, one per file | yes |
+| `reports/*.md` | reports written by Claude Code | yes |
+| `.claude/skills/` | the skills `traj-features`, `traj-discover` and `traj-report` | yes |
+| `.traj/datasets/<dataset>/` | `<id>.json`, `<id>.md`, `index.jsonl` | no |
+| `.traj/instructions/` | instruction files generated for call groups | no |
+| `.traj/mailbox/` | aifn tasks and conclusions, which also serve as the cache | no |
+| `.traj/features/<group>.jsonl` | feature table | no |
+| `.traj/samples/<sampler>/<run>/selection.json` | sampling results | no |
 
-算子、配置、采样策略和报告的每次变化都可以通过 diff 和 commit message 追溯。
-`.traj/` 中的内容都可以由这些文件和原始数据重新生成。
+Every change to operators, configuration, samplers and reports can be traced through diffs and commit messages.
+Everything under `.traj/` can be regenerated from those files and the raw data.
 
-## 4. 统一 Trajectory
+## 4. Unified trajectory
 
-| 类型 | 字段 | 说明 |
+| Type | Field | Meaning |
 |---|---|---|
-| Trajectory | `id` | 数据集内唯一 |
-| | `dataset` | 数据集名 |
-| | `metadata` | 任意键值，例如 cwd、模型、标题、reward |
-| | `steps` | Step 列表 |
-| Step | `index` | 从 0 开始的步号 |
-| | `role` | `user`、`assistant`、`tool`、`system` |
-| | `kind` | `message`、`thinking`、`tool_call`、`tool_result` |
-| | `content` | 文本 |
-| | `name` | 工具名，用于 `tool_call` 和 `tool_result` |
-| | `is_error` | `tool_result` 是否报错 |
-| | `timestamp` | 时间戳 |
+| Trajectory | `id` | unique within the dataset |
+| | `dataset` | dataset name |
+| | `metadata` | any key-value pairs, such as cwd, model, title or reward |
+| | `steps` | list of Step |
+| Step | `index` | step number starting at 0 |
+| | `role` | `user`, `assistant`, `tool`, `system` |
+| | `kind` | `message`, `thinking`, `tool_call`, `tool_result` |
+| | `content` | text |
+| | `name` | tool name for `tool_call` and `tool_result`, or the name of a special step |
+| | `is_error` | whether a `tool_result` is an error |
+| | `timestamp` | time stamp |
 
-trajectory 的全局标识是 `<dataset>/<id>`，文档中称为 key。
+A trajectory is identified globally by `<dataset>/<id>`, called its key.
 
-### 4.1 适配器
+### 4.1 Adapters
 
-适配器把原始文件转换成 Trajectory。
-一个适配器是一个 Python 文件 `<name>.py`，文件中定义 `ADAPTER`，即适配器类；它按 `ADAPTER(**options)` 构造，`read(path, dataset)` 返回该文件中的全部 trajectory。
-内置适配器在包内的 `traj_analyzer/adapters/`，项目适配器在分析项目的 `adapters/`，项目适配器与内置适配器同名时，项目适配器生效。
-`traj.yaml` 的 `datasets` 为每个数据集指定适配器名、输入 glob 列表、排除 glob 列表、适配器参数和数据集说明；已安装的包中的适配器用 `module:Class` 指定。
-`traj adapters list` 列出全部适配器及其使用者。
+An adapter turns raw files into trajectories.
+An adapter is a Python file `<name>.py` that defines `ADAPTER`, the adapter class; it is constructed as `ADAPTER(**options)`, and `read(path, dataset)` returns every trajectory in one input file.
+Built-in adapters live in `traj_analyzer/adapters/` of the package, project adapters in `adapters/` of the analysis project, and a project adapter overrides a built-in adapter of the same name.
+In `traj.yaml`, `datasets` gives each dataset its adapter name, input globs, exclude globs, adapter options and a description; an adapter from an installed package is named as `module:Class`.
+`traj adapters list` shows every adapter and the datasets that use it.
 
-内置的 `claude_code` 适配器读取 Claude Code session 文件。
-它按文件顺序读取 `user` 和 `assistant` 记录，所以通过回退放弃的对话轮次也保留在 trajectory 中。
-`origin.kind` 不是 `human` 的 user 记录，例如后台任务通知，转换为 `system` 步骤。
-以 `<command-name>`、`<local-command-stdout>`、`<bash-input>` 等标签开头的 user 文本是本地命令的记录，同样转换为 `system` 步骤。
-它支持的内容块类型是 `text`、`image`、`thinking`、`tool_use`、`tool_result` 和 `fallback`，其他类型会使读入过程报错终止。
-为空的 `thinking` 块不产生步骤。
+The built-in `claude_code` adapter reads Claude Code session files.
+It reads `user` and `assistant` records in file order, so turns abandoned by a rewind stay in the trajectory.
+User records whose `origin.kind` is not `human`, such as background task notifications, become `system` steps.
+User text starting with tags such as `<command-name>`, `<local-command-stdout>` or `<bash-input>` records local commands and also becomes `system` steps.
+It supports the content block types `text`, `image`, `thinking`, `tool_use`, `tool_result` and `fallback`; any other type stops ingestion with an error.
+Empty `thinking` blocks produce no step.
 
-内置的 `messages` 适配器读取每条记录带一个消息列表的数据，支持 OpenAI chat 格式、Anthropic messages 格式和 ShareGPT 格式。
-消息列表可以是 JSON 数组，也可以是 JSON 字符串，由 `messages_encoding` 指定。
-`role_key` 和 `content_key` 指定角色和内容的字段名，ShareGPT 格式使用 `from` 和 `value`。
+The built-in `messages` adapter reads records that each hold a list of messages, in the OpenAI chat, Anthropic messages or ShareGPT format.
+The message list is a JSON array or a JSON string, as `messages_encoding` says.
+`role_key` and `content_key` name the role and content fields; ShareGPT uses `from` and `value`.
 
-消息中各字段的解析方式：
+How message fields become steps:
 
-| 字段 | 产生的步骤 |
+| Field | Steps |
 |---|---|
-| `content` 为字符串 | 一个步骤，role 和 kind 由角色映射决定 |
-| `content` 为片段列表 | 相邻的文本片段合并为一个步骤；OpenAI 的 `text`、`refusal`、`image_url`、`input_audio`、`file` 片段，以及 Anthropic 的 `text`、`image`、`document`、`thinking`、`redacted_thinking`、`tool_use`、`tool_result` 块各自按类型转换 |
-| `tool_calls` | 每个调用一个 `tool_call` 步骤，arguments 为字符串或 JSON 对象 |
-| `function_call` | 一个 `tool_call` 步骤 |
-| `tool_call_id`、`tool_call_ids` | 按调用 id 找到对应的 `tool_call`，用它的工具名命名 `tool_result` 步骤 |
-| `name` | 工具结果消息没有调用 id 时，用作工具名 |
-| `reasoning_content`、`reasoning` | `include_thinking` 为 true 时产生一个 `thinking` 步骤 |
-| `refusal`、`audio` | 各产生一个带 `[refusal]` 或 `[audio]` 标记的步骤 |
+| `content` as a string | one step, with role and kind from the role mapping |
+| `content` as a list of parts | adjacent text parts merge into one step; OpenAI `text`, `refusal`, `image_url`, `input_audio` and `file` parts and Anthropic `text`, `image`, `document`, `thinking`, `redacted_thinking`, `tool_use` and `tool_result` blocks are each converted by type |
+| `tool_calls` | one `tool_call` step per call, with arguments given as a string or a JSON object |
+| `function_call` | one `tool_call` step |
+| `tool_call_id`, `tool_call_ids` | the `tool_result` step takes the tool name of the call with that id |
+| `name` | the tool name of a tool result message without a call id |
+| `reasoning_content`, `reasoning` | one `thinking` step when `include_thinking` is true |
+| `refusal`, `audio` | one step marked `[refusal]` or `[audio]` |
 
-值为 null 的字段视为不存在。
-消息中出现上表之外的字段时读入过程报错终止，确认可以忽略的字段写入 `ignore_keys`。
-工具结果消息同时带 `name` 和调用 id 时，工具名取自调用 id 对应的调用，因为一些导出数据把 `name` 填成 `unknown_tool` 这样的占位值。
-Anthropic 块中的 `tool_result` 转换为 role 为 `tool` 的步骤，即使它出现在 user 消息中。
+A field whose value is null counts as absent.
+A message field outside this table stops ingestion with an error; fields known to be irrelevant go into `ignore_keys`.
+When a tool result message has both `name` and a call id, the tool name comes from the call with that id, because some exports fill `name` with a placeholder such as `unknown_tool`.
+An Anthropic `tool_result` block becomes a step with role `tool`, even inside a user message.
 
-`role_map` 在默认映射之上增加或覆盖角色映射。
-默认映射是：`system` 和 `developer` 映射到 system；`user` 和 `human` 映射到 user；`assistant` 和 `gpt` 映射到 assistant；`tool` 和 `function` 映射到 tool 的 `tool_result`。
-出现未映射的角色时读入过程报错终止。
-`tool_call_format` 指定 kind 为 `tool_call` 的消息内容如何编码工具名，取值为 `text`、`json` 或 `python_literal`。
-消息列表为 null 或为空的记录会使读入过程报错终止，`skip_empty` 为 true 时跳过这些记录。
+`role_map` adds to or overrides the default role mapping.
+By default `system` and `developer` map to system, `user` and `human` to user, `assistant` and `gpt` to assistant, and `tool` and `function` to a tool `tool_result`.
+An unmapped role stops ingestion with an error.
+`tool_call_format` says how the content of a message of kind `tool_call` encodes the tool name: `text`, `json` or `python_literal`.
+A record whose message list is null or empty stops ingestion with an error, unless `skip_empty` is true.
 
-读入时遇到损坏的文件会报错终止，并给出文件路径和行号。
-需要跳过的文件写入该数据集的 `exclude` 列表。
+A corrupt input file stops ingestion with an error that names the file and line.
+Files to skip go into the dataset's `exclude` list.
 
-### 4.2 渲染与分片
+### 4.2 Rendering and chunking
 
-渲染把 Trajectory 写成 Markdown，每步一个标题 `### #12 assistant · tool_call · Bash`。
-超过 `render.max_step_chars` 的内容会被截断，并注明截断的字符数。
+Rendering writes a trajectory as Markdown, with one heading per step such as `### #12 assistant · tool_call · Bash`.
+Content longer than `render.max_step_chars` is cut, with a note of how many characters were cut.
 
-分片在步与步之间切分，每片不超过 `render.chunk_chars` 个字符，片头写入 `<!-- chunk 3 -->` 标记。
-单个步骤超过上限时独占一片。
+Chunks break between steps, each chunk holds at most `render.chunk_chars` characters, and a `<!-- chunk 3 -->` marker opens each chunk.
+A step longer than the limit forms a chunk of its own.
 
-Markdown 开头依次是数据集说明和元数据 JSON 块。
-数据集说明来自 `datasets.<name>.description`，用来告诉 llm 算子这批 trajectory 是什么、有哪些约定和已知缺陷。
-`render.hide_metadata` 中列出的键不写入 Markdown，llm 算子因此看不到这些信息，例如模型名和评测结果；这些键仍然保存在 `<id>.json` 中，code 算子可以读取。
-列表项可以是键名，也可以是 `eval_*` 这样的通配模式。
+The Markdown opens with the dataset description and a JSON block of metadata.
+The description comes from `datasets.<name>.description` and tells LLM operators what the trajectories are, which conventions they follow, and which defects the data has.
+Keys listed in `render.hide_metadata` stay out of the Markdown, so LLM operators do not see them, for example model names and evaluation results; they stay in `<id>.json`, where code operators read them.
+Entries are keys or glob patterns such as `eval_*`.
 
-每条 trajectory 有两个文件，用途不同：
+Each trajectory has two files for two readers:
 
-| 文件 | 读者 | 内容 |
+| File | Reader | Content |
 |---|---|---|
-| `<id>.json` | code 算子 | 完整的 Trajectory，步骤内容不截断，元数据完整 |
-| `<id>.md` | llm 算子和人 | 带步号、分片标记和数据集说明的可读文本，长步骤被截断，隐藏的元数据不出现 |
+| `<id>.json` | code operators | the complete trajectory, with uncut steps and all metadata |
+| `<id>.md` | LLM operators and people | readable text with step numbers, chunk markers and the dataset description; long steps are cut and hidden metadata is left out |
 
-项目算子文件可以从算子根目录导入以下划线开头的共享模块，例如 `from rca._parse import calls`，因为加载项目算子时会把项目的 `operators/` 目录加入 `sys.path`。
-项目适配器和项目算子都通过同一个加载函数导入。
+Project operator files import shared modules whose names start with an underscore from the operator root, for example `from rca._parse import calls`, because loading project operators adds the project's `operators/` to `sys.path`.
+Project adapters and project operators are imported by the same loader.
 
-## 5. 算子
+## 5. Operators
 
-### 5.1 算子文件
+### 5.1 Operator files
 
-算子是带参数的、可复用的特征提取器。
-一个算子是一个 Python 文件，文件中定义 `OPERATOR`，它是 `traj_analyzer.operators.base.Operator` 的实例。
+An operator is a reusable feature extractor with parameters.
+An operator is a Python file that defines `OPERATOR`, an instance of `traj_analyzer.operators.base.Operator`.
 
-每个特征都是原子化的：取值是“是或否”，或者是从文本中照抄的集合，看文本就能直接得出，不需要多步推理。
-结构化字段能回答的问题交给 code 算子；需要读懂用户或模型所写文字的问题交给 llm 算子，例如“用户是否纠正了 assistant”。
-“是否过早锁定假设”这类需要综合判断的结论不做成特征，由采样条件或报告组合原子特征得出。
-项目模板中的 `traj-features` skill 给出完整的规则和示例。
-算子名由文件相对算子根目录的路径得到，例如 `user/corrects.py` 的算子名是 `user.corrects`。
+Every feature is atomic: a yes or no, or a set copied from the text, readable directly from the text without multi-step reasoning.
+Questions answered by structured fields go to code operators; questions that need reading what a user or a model wrote go to LLM operators, for example "does the user correct the assistant".
+Conclusions that need judgement, such as "the agent locked onto a hypothesis too early", are not features; samplers or reports combine atomic features into them.
+The `traj-features` skill in the project template gives the full rules and examples.
+An operator's name is its path relative to the operator root, so `user/corrects.py` is `user.corrects`.
 
-| 字段 | 含义 |
+| Field | Meaning |
 |---|---|
-| `kind` | `code` 或 `llm` |
-| `description` | 一句话说明算子提取什么 |
-| `params` | Pydantic 模型，字段带默认值 |
-| `outputs(params)` | 返回 `FeatureSpec` 列表，即该算子产出的特征 |
-| `compute(trajectory, params)` | 只用于 code 算子，返回每个输出名对应的值 |
-| `guidance(params)` | 只用于 llm 算子，返回写入 instruction 的判断标准 |
-| `requires(trajectory)` | 判断算子是否适用于这条 trajectory，不适用时特征值为空 |
-| `tags` | 场景标签，例如 `chat`、`agent`，用于筛选算子库 |
+| `kind` | `code` or `llm` |
+| `description` | one sentence on what the operator extracts |
+| `params` | a Pydantic model whose fields have defaults |
+| `outputs(params)` | the list of `FeatureSpec` the operator produces |
+| `compute(trajectory, params)` | code operators only: a value for every output name |
+| `guidance(params)` | LLM operators only: judging criteria written into the instruction |
+| `requires(trajectory)` | whether the operator applies to a trajectory; the others get empty values |
+| `tags` | scenario tags such as `chat` or `agent`, for filtering the library |
 
-下面是一个 llm 算子文件：
+An LLM operator file:
 
 ```python
 from traj_analyzer.operators.base import FeatureSpec, NoParams, Operator, has_user_messages
@@ -188,42 +188,44 @@ OPERATOR = Operator(
 )
 ```
 
-### 5.2 算子来源
+A feature is named with a noun, such as `tool_calls`, or with a noun and a verb, such as `user_corrects`; a name never starts with a verb.
 
-| 来源 | 位置 |
+### 5.2 Where operators come from
+
+| Source | Location |
 |---|---|
-| 内置算子库 | 包内的 `traj_analyzer/operators/library/` |
-| 项目算子 | 分析项目的 `operators/` |
+| built-in library | `traj_analyzer/operators/library/` of the package |
+| project operators | `operators/` of the analysis project |
 
-项目算子与内置算子同名时，项目算子生效。
-文件名以下划线开头的文件不是算子，可以存放多个算子共用的代码。
+A project operator overrides a built-in operator of the same name.
+Files whose names start with an underscore are not operators and hold code shared by operators.
 
-内置算子库包含以下算子：
+The built-in library:
 
-| 算子 | kind | 特征 | 类型 |
+| Operator | Kind | Features | Type |
 |---|---|---|---|
-| `stats.basic` | code | `n_steps`、`n_user_turns`、`total_chars`、`duration_minutes` | scalar |
-| `stats.tool_usage` | code | `n_tool_calls`、`tool_error_rate` | scalar |
-| | | `tool_calls`、`tool_errors`：每个工具的调用次数和报错次数 | map |
-| `meta.fields` | code | 由参数 `fields` 决定，把指定的元数据字段复制为特征 | 按参数 |
-| `task.request_kinds` | llm | `request_kinds`：用户消息提出了哪几类请求 | set |
-| `user.complains` | llm | `user_complains`：用户是否写了对 assistant 不满意 | boolean |
-| `user.corrects` | llm | `user_corrects`：用户是否指出 assistant 做错了 | boolean |
-| `user.follow_up` | llm | `user_follow_up`：用户是否在回答之后追加提问或请求 | boolean |
-| `user.approves` | llm | `user_approves`：用户是否认可了结果 | boolean |
-| `assistant.claims_done` | llm | `assistant_claims_done`：assistant 是否写了任务已完成 | boolean |
-| `assistant.asks_user` | llm | `assistant_asks_user`：assistant 是否向用户提问 | boolean |
+| `stats.basic` | code | `n_steps`, `n_user_turns`, `total_chars`, `duration_minutes` | scalar |
+| `stats.tool_usage` | code | `n_tool_calls`, `tool_error_rate` | scalar |
+| | | `tool_calls`, `tool_errors`: calls and errors per tool | map |
+| `meta.fields` | code | chosen metadata fields, set by the `fields` parameter | per parameter |
+| `task.request_kinds` | llm | `request_kinds`: the kinds of request the user's messages make | set |
+| `user.complains` | llm | `user_complains`: the user writes that they are unhappy with the assistant | boolean |
+| `user.corrects` | llm | `user_corrects`: the user points out that the assistant got something wrong | boolean |
+| `user.follow_up` | llm | `user_follow_up`: the user asks a further question or makes a further request after an answer | boolean |
+| `user.approves` | llm | `user_approves`: the user accepts the result | boolean |
+| `assistant.claims_done` | llm | `assistant_claims_done`: the assistant writes that the task is done | boolean |
+| `assistant.asks_user` | llm | `assistant_asks_user`: the assistant asks the user a question | boolean |
 
-内置的 llm 算子都是原子特征，每个特征只需找到一句话就能回答。
+Every built-in LLM feature is atomic and can be answered by finding one statement.
 
-`meta.fields` 的参数 `fields` 是特征名到字段定义的映射。
-字段定义包括元数据键 `key`、特征类型 `type`（`boolean`、`scalar`、`category`、`set`、`map`），以及可选的 `labels`、`range`、`thresholds`、`required`。
-`required` 缺省为 true，元数据缺少该键时提取报错终止；为 false 时特征值为空。
-这个算子用来把评测结果、模型名、案例属性等外部信息放进特征表，供采样条件和报告使用。
+The `fields` parameter of `meta.fields` maps feature names to field definitions.
+A field definition has the metadata key `key`, the feature type `type` (`boolean`, `scalar`, `category`, `set` or `map`), and optional `labels`, `range`, `thresholds` and `required`.
+`required` defaults to true, and a missing key then stops extraction with an error; when false, the feature is empty.
+This operator brings outside information such as evaluation results, model names and case attributes into the feature table for sampling conditions and reports.
 
-### 5.3 启用算子
+### 5.3 Enabling operators
 
-`traj.yaml` 的 `operators` 列表决定启用哪些算子：
+The `operators` list in `traj.yaml` decides which operators run:
 
 ```yaml
 operators:
@@ -243,89 +245,89 @@ calls:
   dialogue: {evidence: true, model: DeepSeek-V4-pro}
 ```
 
-| 字段 | 含义 |
+| Field | Meaning |
 |---|---|
-| `use` | 算子名 |
-| `as` | 实例名，缺省为算子名；同一个算子启用多次时用来区分实例 |
-| `prefix` | 给该实例的每个特征名加上 `<prefix>_` 前缀，避免同一个算子启用多次时特征重名 |
-| `call` | 只用于 llm 算子，指定调用组，缺省为 `default` |
-| `params` | 覆盖算子参数的默认值 |
+| `use` | operator name |
+| `as` | instance name, the operator name by default; it tells apart instances of one operator enabled several times |
+| `prefix` | prepended as `<prefix>_` to every feature name of the instance, so that repeated instances do not clash |
+| `call` | LLM operators only: the call group, `default` by default |
+| `params` | overrides of the operator's parameter defaults |
 
-`calls` 为调用组设置 `model` 和 `evidence`。
-`model` 覆盖 `engine.model`，`evidence` 为 true 时每个特征附带一段引用步号的判断依据，缺省为 true。
+`calls` sets `model` and `evidence` per call group.
+`model` overrides `engine.model`; with `evidence` true, the default, every feature comes with a short justification citing step numbers.
 
-特征名在整个项目内唯一，因为它们会成为宽表的列名，重名时配置校验报错。
+Feature names are unique within a project, because they become column names of the wide table; a clash is a configuration error.
 
-### 5.4 执行组
+### 5.4 Execution groups
 
-启用的算子组成执行组，执行组是提取、缓存和特征表的单位：
+Enabled operators form execution groups, the unit of extraction, caching and the feature table:
 
-| 执行组 | 组成 | 组名 |
+| Group | Members | Name |
 |---|---|---|
-| code 执行组 | 一个 code 算子实例 | 实例名，其中的点号换成短横线，例如 `stats-basic` |
-| llm 执行组 | 同一个 `call` 的全部 llm 算子实例 | `call` 的值 |
+| code group | one code operator instance | the instance name with dots replaced by hyphens, e.g. `stats-basic` |
+| LLM group | every LLM operator instance of one `call` | the value of `call` |
 
-一个 llm 执行组对应一个 aifn `AiFunction`，每条 trajectory 只调用一次，模型一次输出组内所有特征。
+One LLM group is one aifn `AiFunction`: each trajectory gets one call, and the model returns every feature of the group at once.
 
-### 5.5 特征类型
+### 5.5 Feature types
 
-| type | 取值 | 必需字段 | 可选字段 | 例子 |
+| type | Value | Required fields | Optional fields | Example |
 |---|---|---|---|---|
-| `boolean` | 是或否 | | | 用户是否纠正了 assistant |
-| `scalar` | 一个数 | | `range` | 步数、工具报错率 |
-| `category` | 一个标签 | | `labels`，缺省时为任意非空字符串 | 所属系统、模型名 |
-| `set` | 互不相同的标签列表 | | `labels`，缺省时为任意非空字符串 | 用户提出的请求类别、智能体怀疑过的服务 |
-| `vector` | 有顺序的一串数 | `per: chunk` 或 `length: k` | `range`，约束每个元素 | 每个分片内的报错数 |
-| `map` | 标签到数的映射 | | `labels` 约束键，缺省时为任意非空字符串；`range` 约束值 | 每个工具的调用次数 |
+| `boolean` | yes or no | | | whether the user corrects the assistant |
+| `scalar` | one number | | `range` | number of steps, tool error rate |
+| `category` | one label | | `labels`, any non-empty string without them | system, model name |
+| `set` | a list of distinct labels | | `labels`, any non-empty string without them | kinds of user request, services the agent suspected |
+| `vector` | an ordered list of numbers | `per: chunk` or `length: k` | `range` for every element | errors per chunk |
+| `map` | label to number | | `labels` for the keys, any non-empty string without them; `range` for the values | calls per tool |
 
-`boolean`、`set`、`vector`、`map` 是四种基本形态，`scalar` 和 `category` 分别是只有一个元素的 vector 和 set。
-所有类型都可以带 `thresholds`，采样条件按名称引用这些阈值。
-code 算子返回的值按同样的类型校验，校验失败时提取报错终止。
+`boolean`, `set`, `vector` and `map` are the four basic shapes; `scalar` and `category` are a vector and a set with one element.
+Every type can carry `thresholds`, which sampling conditions reference by name.
+Values returned by code operators are checked against the same types, and a failed check stops extraction with an error.
 
-### 5.6 llm 执行组生成 aifn 函数
+### 5.6 From an LLM group to an aifn function
 
-1. `pydantic.create_model` 把执行组的全部特征转换成 Pydantic 输出模型，`range`、`labels`、元素互不相同和概率总和都成为校验规则。
-   agent 提交的结果不合法时，aifn 把字段路径和错误信息反馈给 agent，由 agent 修正后重新提交。
-2. 执行组渲染成 `.traj/instructions/<group>.md`，内容包括任务说明、文件结构、每个算子的说明和 guidance、每个特征的定义和取值约束、依据的写法。
-3. 请求内容是 `{trajectory_file, n_chunks, sha256, model}`，`sha256` 是 Markdown 文件的内容哈希。
-   workspace 是该数据集的渲染目录，权限为只读。
-4. aifn 的 mailbox 对函数名、请求、instruction 和 workspace 都相同的调用直接复用已有结论。
-   instruction 由算子和参数生成，请求带有文件内容哈希和模型名，所以修改算子、重新读入改变了 Markdown、或者更换模型时都会重新调用，其余情况直接使用缓存。
-   提交前把 mailbox 中已有的调用读一遍建成索引，之后每条请求只查索引。
+1. `pydantic.create_model` turns every feature of the group into a Pydantic output model; `range`, `labels` and distinct set items become validation rules.
+   When the agent submits an invalid answer, aifn returns the field paths and errors to the agent, which corrects and resubmits.
+2. The group is rendered into `.traj/instructions/<group>.md`: the task, the file layout, each operator's description and guidance, each feature's definition and constraints, and how to write evidence.
+3. The request is `{trajectory_file, n_chunks, sha256, model}`, where `sha256` is the content hash of the Markdown file.
+   The workspace is the dataset's render directory, read-only.
+4. The aifn mailbox answers a call from an earlier conclusion when the function name, request, instruction and workspace are all the same.
+   The instruction comes from the operators and their parameters, and the request carries the content hash and the model name, so changing an operator, re-ingesting a changed Markdown file or switching models calls the model again; everything else is served from the cache.
+   Before submitting, the calls already in the mailbox are read once into an index, and each request only looks up that index.
 
-### 5.7 提取调度
+### 5.7 Extraction
 
-`traj extract` 按以下步骤执行：
+`traj extract` runs these steps:
 
-1. 存在 llm 执行组时，检查 `engine.env_passthrough` 中的环境变量是否都已设置，缺少时报错终止。
-2. 逐条读取 trajectory 的 JSON，每条只读一次：计算全部 code 执行组，并判断每个 llm 执行组中每个实例是否适用。
-   code 算子的值按特征类型校验，每个特征只构建一次校验器。
-3. 对每个 llm 执行组，没有适用实例的 trajectory 不调用模型，其余 trajectory 各提交一个任务，已有结论的任务直接复用。
-4. 存在未完成的任务时，启动 `extract.workers` 个 `python -m aifn worker traj_analyzer.runtime:make_worker --once` 子进程。
-   worker 通过环境变量 `TRAJ_PROJECT` 找到项目，并由同一份配置构建相同的函数表。
-   队列清空后 worker 退出，任何 worker 以非零状态码退出时命令报错终止。
-5. 读取全部结论，写入 `.traj/features/<group>.jsonl`，每行是 `{key, group, feature, value, evidence, status, detail}`。
-   算子不适用时 `value` 为空，`detail` 为 `not applicable`。
-   拒答写为 `refused`，执行失败写为 `failed`，逐片向量长度与分片数不一致写为 `invalid_length`。
+1. When there are LLM groups, check that every environment variable in `engine.env_passthrough` is set, and stop with an error if one is missing.
+2. Read each trajectory's JSON once: compute every code group, and decide for every instance of every LLM group whether it applies.
+   Code values are checked against their feature types, with one validator built per feature.
+3. For each LLM group, trajectories with no applicable instance get no model call; every other trajectory gets one task, and tasks with an earlier conclusion reuse it.
+4. When tasks are outstanding, start `extract.workers` subprocesses `python -m aifn worker traj_analyzer.runtime:make_worker --once`.
+   Workers find the project through the environment variable `TRAJ_PROJECT` and build the same functions from the same configuration.
+   Workers exit when the queue is empty, and any worker exiting with a non-zero code stops the command with an error.
+5. Read every conclusion and write `.traj/features/<group>.jsonl`, one line `{key, group, feature, value, evidence, status, detail}` per feature.
+   When the operator does not apply, `value` is empty and `detail` is `not applicable`.
+   Refusals have status `refused`, execution failures `failed`, and per-chunk vectors whose length differs from the chunk count `invalid_length`.
 
-特征表始终保存最近一次 `traj extract` 写入的结果，本次运行覆盖的 trajectory 的行被替换，其余行保留。
-修改算子或配置、重新读入数据之后，再运行一次 `traj extract` 即可刷新：code 执行组每次都重新计算，代价很小；llm 执行组只对变化的部分调用模型。
-`traj extract --dry-run` 只查询缓存，不写入任务也不改特征表，其中 llm 执行组的 `pending` 就是需要调用模型的数量。
-worker 每次运行都会处理 mailbox 中全部未完成的任务，包括之前中断的运行留下的任务。
+The feature table always holds what the last `traj extract` wrote: rows of the trajectories in that run are replaced, and other rows stay.
+After changing operators or configuration, or re-ingesting data, run `traj extract` again to refresh it: code groups are always recomputed at little cost, and LLM groups call the model only for what changed.
+`traj extract --dry-run` only looks up the cache, writes no tasks and leaves the feature table alone; for LLM groups, its `pending` count is the number of model calls a run would make.
+Every worker run processes every unfinished task in the mailbox, including tasks left by an interrupted run.
 
-### 5.8 模型配置
+### 5.8 Model configuration
 
-`traj.yaml` 的 `engine` 段决定 llm 算子由哪个模型计算：
+The `engine` section of `traj.yaml` decides which model computes LLM operators:
 
-| 字段 | 作用 |
+| Field | Purpose |
 |---|---|
-| `dsh_home` | 安装了 aifn harness bundle 的 dsh home |
-| `provider`、`model` | dsh 中的 provider 名和模型名，调用组可以用 `calls.<call>.model` 覆盖模型名 |
-| `max_tokens`、`reasoning_effort` | 传给模型的生成参数 |
-| `env_passthrough` | 传给 dsh 运行时的环境变量名，通常是 API key |
-| `patches` | 相对项目根目录的 dsh patch 文件列表，用于添加 provider 路由 |
+| `dsh_home` | the dsh home where the aifn harness bundle is installed |
+| `provider`, `model` | the dsh provider and model name; `calls.<call>.model` overrides the model per call group |
+| `max_tokens`, `reasoning_effort` | generation parameters passed to the model |
+| `env_passthrough` | names of environment variables passed to the dsh runtime, usually credentials and endpoints |
+| `patches` | dsh patch files relative to the project root, which add provider routes |
 
-通过 OpenAI 兼容接口访问模型时，在 patch 中配置 `sdk` profile 的 `llm-pi-ai` 行：
+A model behind an OpenAI-compatible endpoint is reached through a patch on the `llm-pi-ai` row of the `sdk` profile:
 
 ```yaml
 - id: llm-pi-ai
@@ -341,44 +343,44 @@ worker 每次运行都会处理 mailbox 中全部未完成的任务，包括之�
             contextWindow: 262144
 ```
 
-对应的 `engine` 配置是 `provider: litellm`、`model: DeepSeek-V4-flash`、`env_passthrough: [LITELLM_API_KEY, LITELLM_BASE_URL]`、`patches: [engine/litellm.patch.yml]`。
-接口地址和密钥都通过环境变量传入，不写进项目文件。
+The matching `engine` configuration is `provider: litellm`, `model: DeepSeek-V4-flash`, `env_passthrough: [LITELLM_API_KEY, LITELLM_BASE_URL]` and `patches: [engine/litellm.patch.yml]`.
+Endpoints and keys arrive through environment variables and are never written into project files.
 
-### 5.9 特征发现
+### 5.9 Feature discovery
 
-`traj discover` 是只有一个策略的采样：默认在全部 code 执行组的特征上做多样性采样，从每个簇中取离中心最近的 trajectory，并输出渲染文件路径和所在簇的大小。
-`--group` 指定参与采样的执行组，`--method random` 改为随机抽取，两种方式都要求这些执行组已经提取过。
-`traj-discover` skill 指导 Claude Code 按以下顺序工作：
+`traj discover` is sampling with a single strategy: by default diversity sampling over the features of every code group, taking the trajectory nearest each cluster centre and reporting its rendered file and cluster size.
+`--group` chooses the groups to sample over, and `--method random` samples at random; both need those groups extracted first.
+The `traj-discover` skill guides Claude Code through these steps:
 
-1. 阅读样本，记录 trajectory 之间的差异。
-2. 用 `traj operators list` 和 `traj operators show` 查找能表达这些差异的算子，用 `traj operators enable` 启用。
-3. 算子库没有覆盖的差异，在项目的 `operators/` 中编写新算子。
-4. 用 `traj validate` 检查配置，用 `traj extract --limit` 在少量样本上试跑。
+1. Read the samples and note how the trajectories differ.
+2. Find operators that capture the differences with `traj operators list` and `traj operators show`, and enable them with `traj operators enable`.
+3. For differences the library does not cover, write new operators in the project's `operators/`, following the `traj-features` skill.
+4. Check the configuration with `traj validate`, and try the operators on a few trajectories with `traj extract --limit`.
 
-人通过 git diff 审阅后提交。
-在多个项目中都有用的项目算子可以移入内置算子库。
+People review the git diff before committing.
+Project operators useful across projects can move into the built-in library.
 
-## 6. 采样
+## 6. Sampling
 
-### 6.1 向量化
+### 6.1 Vectorization
 
-每个特征展开成宽表中的若干列：
+Each feature expands into columns of the wide table:
 
-| type | 查询列，用于条件筛选 | 距离列，用于聚类和离群检测 |
+| type | Query columns, for conditions | Distance columns, for clustering and outliers |
 |---|---|---|
-| scalar、boolean | `name` | `name` |
-| category | `name`，字符串 | 每个标签一列 one-hot |
-| set | 每个标签一列 multi-hot，以及 `name__count` | 每个标签一列 multi-hot |
-| vector | `name__max`、`__min`、`__mean`、`__first`、`__last` | 重采样到 `sampling.vector_length` 个点，加上五个聚合列 |
-| map | 每个键一列数值，trajectory 的 map 中没有该键时为 0 | 同左 |
+| scalar, boolean | `name` | `name` |
+| category | `name`, as a string | one one-hot column per label |
+| set | one multi-hot column per label, and `name__count` | one multi-hot column per label |
+| vector | `name__max`, `__min`, `__mean`, `__first`, `__last` | the vector resampled to `sampling.vector_length` points, plus the five aggregates |
+| map | one column per key, 0 when a trajectory's map lacks the key | same |
 
-没有 `labels` 的 category、set 和 map 特征取出现次数最多的 100 个标签作为列。
-宽表读取特征表中当前启用的特征，只取状态为 `ok` 的值；其他状态的行在宽表中是空值。
-`traj status` 按执行组统计特征表：有行的 trajectory 数 `extracted`、没有行的 trajectory 数 `missing`，以及按状态分类的数量。
-距离列先做标准化，缺失值填为该列均值。
-每个特征的权重除以其列数的平方根，使列数多的特征不会主导距离。
+Category, set and map features without `labels` use the 100 most frequent labels as columns.
+The wide table reads the enabled features from the feature table and takes only values with status `ok`; rows with other statuses are empty in the wide table.
+`traj status` counts, per group, the trajectories with rows (`extracted`), those without (`missing`), and the rows by status.
+Distance columns are standardized, and missing values are filled with the column mean.
+Each feature's weight is divided by the square root of its column count, so features with many columns do not dominate distances.
 
-### 6.2 策略
+### 6.2 Strategies
 
 ```yaml
 name: default
@@ -387,9 +389,9 @@ seed: 0
 features: all
 strategies:
   - kind: target
-    label: frustrated
+    label: corrected
     quota: 0.25
-    where: "user_frustration >= {user_frustration.high}"
+    where: "user_corrects == 1"
     within: diversity
   - kind: outlier
     label: outlier
@@ -400,97 +402,97 @@ strategies:
     quota: rest
 ```
 
-`features` 可以是 `all`、特征名列表，或者特征名到权重的映射。
-`population` 默认为 `complete`，只在每个采样特征都在特征表中有行的 trajectory 中采样；值为空的行也算，例如算子不适用、没有工具结果时的 `tool_error_rate`，以及大模型拒答或调用失败。
-`population: all` 在全部 trajectory 中采样。
-`quota` 可以是 0 到 1 之间的比例、整数或 `rest`。
-策略按列表顺序执行，已入选的 trajectory 不会再次入选。
+`features` is `all`, a list of feature names, or a map from feature name to weight.
+`population` defaults to `complete`, which samples only trajectories with a feature-table row for every sampler feature; rows with empty values count, such as an operator that does not apply, `tool_error_rate` without tool results, or a refused or failed model call.
+`population: all` samples every trajectory.
+`quota` is a fraction between 0 and 1, an integer, or `rest`.
+Strategies run in order, and a trajectory picked once is not picked again.
 
-| kind | 做法 | 入选原因 |
+| kind | Method | Reason recorded |
 |---|---|---|
-| `target` | 用 `pandas.DataFrame.query` 按 `where` 筛选，`{feature.threshold}` 替换为算子输出中的阈值，再按 `within` 在子集内挑选 | 条件、命中数量，以及排序列的值或簇信息 |
-| `outlier` | `isolation_forest` 或 `knn` 打分，取分数最高的 | 方法、分数、排名 |
-| `diversity` | KMeans 聚成 quota 个簇，簇按大小依次轮流取离中心最近的未入选成员 | 簇编号、簇大小、簇占比 |
-| `random` | 随机抽取 | 无 |
+| `target` | filter with `pandas.DataFrame.query` on `where`, with `{feature.threshold}` replaced by the threshold from the feature definition, then pick within the subset as `within` says | the condition, the number of matches, and the ranking value or cluster |
+| `outlier` | score with `isolation_forest` or `knn` and take the highest scores | method, score, rank |
+| `diversity` | cluster into quota clusters with KMeans; clusters take turns from the largest down, each giving its free member nearest the centre | cluster number, size and share |
+| `random` | pick at random | none |
 
-`within` 取值为 `diversity`、`random`、`top:<列名>` 或 `bottom:<列名>`。
-采样结果写入 `selection.json` 并打印到 stdout。
-结果包含采样总体的大小、每个策略的配额、实际入选数和 target 策略的命中数，以及入选列表。
-入选列表中每条包含 key、渲染文件路径、策略、入选原因和该条 trajectory 的全部查询列。
+`within` is `diversity`, `random`, `top:<column>` or `bottom:<column>`.
+The result is written to `selection.json` and printed to stdout.
+It holds the population size, each strategy's quota, picks and target matches, and the list of picks.
+Each pick holds the key, the rendered file, the strategy, the reason, and every query column of the trajectory.
 
-## 7. 报告与反馈
+## 7. Reports and feedback
 
-`traj-report` skill 指导 Claude Code 按以下步骤工作：
+The `traj-report` skill guides Claude Code through these steps:
 
-1. 运行 `traj extract` 刷新采样用到的执行组，再用 `traj status` 确认它们没有 `missing`。
-2. 运行 `traj table --format describe` 查看整体分布。
-3. 运行 `traj sample`，得到入选列表和入选原因。
-4. 阅读入选的渲染文件，核对特征值是否正确。
-5. 在 `reports/<日期>-<主题>.md` 中撰写报告，每条结论引用 trajectory key 和步号。
-6. 把对算子、启用配置和采样策略的修改写入文件，运行 `traj validate`，与报告一起提交，commit message 写明依据的报告。
+1. Run `traj extract` for the groups the sampler uses, and check with `traj status` that they have no `missing` trajectories.
+2. Run `traj table --format describe` for the overall distributions.
+3. Run `traj sample` for the picks and their reasons.
+4. Read the picked trajectories and check their feature values.
+5. Write `reports/<date>-<topic>.md`, citing trajectory keys and step numbers for every finding.
+6. Write the resulting changes to operators, enabled configuration and samplers, run `traj validate`, and commit them with the report, naming the report in the commit message.
 
 ## 8. CLI
 
-| 命令 | 作用 |
+| Command | Purpose |
 |---|---|
-| `traj init <dir>` | 生成分析项目 |
-| `traj ingest [dataset...]` | 读入原始数据，写出统一格式和渲染文件 |
-| `traj adapters list` | 列出内置和项目中的适配器，以及使用它们的数据集 |
-| `traj operators list [--tag t] [--kind code\|llm]` | 列出内置算子库和项目中的算子，以及各自的启用情况 |
-| `traj operators show <name>` | 输出算子的参数、默认值、输出、guidance 和文件路径 |
-| `traj operators enable <name> [--as a] [--prefix p] [--call c] [--param k=v...]` | 在 `traj.yaml` 中启用算子，保留文件中的注释和格式 |
-| `traj operators disable <name>` | 从 `traj.yaml` 中移除算子名或实例名等于 `<name>` 的条目 |
-| `traj validate [--instructions]` | 校验配置、全部执行组和采样策略，输出生成的输出 schema |
-| `traj discover [--n 20] [--method diversity\|random] [--group g...]` | 挑选用于特征发现的样本 |
-| `traj extract [--group g] [--dataset d] [--key k] [--limit n] [--workers n] [--dry-run]` | 提取特征 |
-| `traj table [--format json\|csv\|describe] [--columns c...]` | 输出宽表 |
-| `traj sample [--sampler default] [--budget n]` | 采样 |
-| `traj show <key> [--cat]` | 输出某条 trajectory 的渲染文件路径和特征，或输出渲染内容 |
-| `traj status` | 输出数据集规模和各执行组的提取情况 |
+| `traj init <dir>` | create an analysis project |
+| `traj ingest [dataset...]` | read raw data and write the unified and rendered files |
+| `traj adapters list` | list built-in and project adapters and the datasets using them |
+| `traj operators list [--tag t] [--kind code\|llm]` | list built-in and project operators and where they are enabled |
+| `traj operators show <name>` | show an operator's parameters, defaults, outputs, guidance and file |
+| `traj operators enable <name> [--as a] [--prefix p] [--call c] [--param k=v...]` | enable an operator in `traj.yaml`, keeping the file's comments and layout |
+| `traj operators disable <name>` | remove the entries whose operator or instance name is `<name>` from `traj.yaml` |
+| `traj validate [--instructions]` | check the configuration, every group and every sampler, and print the generated output schemas |
+| `traj discover [--n 20] [--method diversity\|random] [--group g...]` | pick trajectories for feature discovery |
+| `traj extract [--group g] [--dataset d] [--key k] [--limit n] [--workers n] [--dry-run]` | extract features |
+| `traj table [--format json\|csv\|describe] [--columns c...]` | print the wide table |
+| `traj sample [--sampler default] [--budget n]` | sample |
+| `traj show <key> [--cat]` | print a trajectory's rendered file and features, or its rendered content |
+| `traj status` | print dataset sizes and extraction coverage per group |
 
-`operators enable` 和 `operators disable` 先校验修改后的完整配置，校验通过后才写入 `traj.yaml`。
-退出码：0 表示成功，1 表示运行错误，2 表示用法或配置错误。
+`operators enable` and `operators disable` validate the whole modified configuration before writing `traj.yaml`.
+Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 
-## 9. 扩展点
+## 9. Extension points
 
-读入、渲染、提取、缓存、向量化、采样这条流水线是固定的，接入新数据和新特征只需要增加文件：
+The pipeline of ingestion, rendering, extraction, caching, vectorization and sampling is fixed; new data and new features are added as files:
 
-| 扩展什么 | 增加什么 | 放在哪里 | 接口 |
+| To add | Add | Where | Interface |
 |---|---|---|---|
-| 数据源 | 一个适配器文件 `<name>.py` | 分析项目的 `adapters/`；通用的放进包内的 `traj_analyzer/adapters/` | 定义 `ADAPTER` 类，构造参数来自 `datasets.<name>.options`，`read(path, dataset)` 返回 Trajectory |
-| 特征 | 一个算子文件 `<namespace>/<name>.py` | 分析项目的 `operators/`；通用的放进包内的 `traj_analyzer/operators/library/` | 定义 `OPERATOR`，`outputs` 返回六种特征类型之一的 `FeatureSpec` 列表 |
-| 采样方式 | 一个采样配置 `<name>.yaml` | 分析项目的 `samplers/` | `SamplerSpec` |
+| a data source | an adapter file `<name>.py` | the project's `adapters/`; general ones in `traj_analyzer/adapters/` of the package | defines the class `ADAPTER`, constructed from `datasets.<name>.options`; `read(path, dataset)` returns trajectories |
+| features | an operator file `<namespace>/<name>.py` | the project's `operators/`; general ones in `traj_analyzer/operators/library/` of the package | defines `OPERATOR`; `outputs` returns `FeatureSpec` of the six feature types |
+| a sampling scheme | a sampler file `<name>.yaml` | the project's `samplers/` | `SamplerSpec` |
 
-适配器和算子之间只通过 Trajectory 交互。
-项目算子依赖某个适配器的约定时，例如元数据键名和特殊步骤的 `name`，约定写在适配器文件的常量和数据集说明中。
-新文件无需注册：`traj adapters list` 和 `traj operators list` 自动发现，项目中的同名文件覆盖包内的文件。
+Adapters and operators meet only through the Trajectory.
+When project operators depend on conventions of an adapter, such as metadata keys or the `name` of special steps, those conventions are constants in the adapter file and appear in the dataset description.
+New files need no registration: `traj adapters list` and `traj operators list` find them, and a project file overrides a package file of the same name.
 
-## 附录
+## Appendix
 
-### A. 分片的用途
+### A. What chunks are for
 
-aifn 的 DeepSeek engine 让 agent 在 workspace 中用文件工具阅读文件，长文件可以分段读取。
-分片标记用于逐片特征，保证逐片向量的长度和每个元素的含义在不同调用之间一致。
+aifn's DeepSeek engine lets the agent read files in the workspace with file tools, so long files are read in parts.
+Chunk markers serve per-chunk features: they keep the length of a per-chunk vector, and the meaning of each element, the same across calls.
 
-### B. 逐片向量的长度检查
+### B. Length check of per-chunk vectors
 
-输出模型按执行组生成，生成时无法得知每条 trajectory 的分片数，所以向量长度在结论写入特征表时检查。
-instruction 要求向量长度等于输入中的 `n_chunks`。
+The output model is built once per group, without knowing any trajectory's chunk count, so vector lengths are checked when conclusions are written to the feature table.
+The instruction asks for a length equal to `n_chunks` in the input.
 
-### C. 测试数据
+### C. Test data
 
-测试使用真实数据：UltraChat 和 Toucan 两个公开数据集的样本，以及本仓库设计讨论的 Claude Code session 片段。
-`tests/data/messages/` 保存了六个公开数据集的样本，覆盖 `messages` 适配器支持的各种消息结构：
+Tests use real data: samples of the public UltraChat and Toucan datasets, and a fragment of this repository's design conversation as a Claude Code session.
+`tests/data/messages/` holds samples of six public datasets covering the message structures of the `messages` adapter:
 
-| 文件 | 数据集 | 覆盖的结构 |
+| File | Dataset | Structures covered |
 |---|---|---|
-| `unified.jsonl` | ChrisDing1105/unified-agent-trajectories | `tool_calls`、`tool_call_id`、`reasoning_content`、对象形式的 arguments |
-| `openhands.jsonl` | SWE-Gym/OpenHands-Sampled-Trajectories | 值为 null 的字段、工具结果消息的 `name` |
-| `swesmith.jsonl` | SWE-bench/SWE-smith-trajectories | 片段列表形式的 content、`tool_call_ids`、需要 `ignore_keys` 的额外字段 |
-| `nlile.jsonl` | nlile/misc-merged-claude-code-traces-v1 | Anthropic 的 `text`、`tool_use`、`tool_result` 块 |
-| `mimo.jsonl` | choucsan/mimo-claude-code-traces-1k | 占位值 `unknown_tool` 的工具名 |
-| `hermes.jsonl` | NousResearch/hermes-function-calling-v1 | ShareGPT 的 `from` 和 `value` |
+| `unified.jsonl` | ChrisDing1105/unified-agent-trajectories | `tool_calls`, `tool_call_id`, `reasoning_content`, arguments as objects |
+| `openhands.jsonl` | SWE-Gym/OpenHands-Sampled-Trajectories | fields set to null, `name` on tool result messages |
+| `swesmith.jsonl` | SWE-bench/SWE-smith-trajectories | content as a list of parts, `tool_call_ids`, extra fields needing `ignore_keys` |
+| `nlile.jsonl` | nlile/misc-merged-claude-code-traces-v1 | Anthropic `text`, `tool_use` and `tool_result` blocks |
+| `mimo.jsonl` | choucsan/mimo-claude-code-traces-1k | the placeholder tool name `unknown_tool` |
+| `hermes.jsonl` | NousResearch/hermes-function-calling-v1 | ShareGPT `from` and `value` |
 
-session 片段不包含 `attachment` 记录，因为这些记录保存了用户的环境信息。
-`tests/data/replay/` 保存了在三条 Toucan trajectory 上真实调用模型得到的 aifn 事件记录和提交结果，按渲染文件的内容哈希命名。
-`tests/data/operators/fixture/outcome.py` 的输出与这些记录一致，测试通过 aifn 的 `ReplayEngine` 重放记录，覆盖从提交任务、worker 执行、输出校验到写入特征表的完整路径。
+The session fragment leaves out `attachment` records, which hold the user's environment details.
+`tests/data/replay/` holds aifn event records and submissions of real model runs on three Toucan trajectories, named by the content hash of the rendered file.
+The outputs of `tests/data/operators/fixture/outcome.py` match those records, and tests replay them through aifn's `ReplayEngine`, covering the whole path from submitting tasks through worker execution and output validation to the feature table.
