@@ -76,7 +76,7 @@ When the same question can be answered from fields, use a code operator: it cost
 - For sets, ask the model to copy names exactly as written, and give `labels` when the possible values are known.
 - Tell the model not to judge whether the statement is correct.
 - Keep `evidence: true` on the call, so every value cites the step it comes from.
-- Use the ground truth in metadata only as a lookup, such as "which of rc_services appear in suspected_services".
+- Keep ground truth out of LLM features: hide it with `render.hide_metadata`, and compare extracted values with it downstream, in samplers or reports.
 - Put features that read the same part of the trajectory in one call group, since each call reads the file once.
 
 An LLM operator file:
