@@ -24,20 +24,18 @@ traj adapters list
 traj ingest
 traj operators list
 traj extract --group stats-basic --group stats-tool_usage
-traj discover --n 20
-traj validate
 traj extract --group dialogue --limit 5
-traj study screen corrections
-traj study pairs corrections
+traj table > .traj/table.csv
 traj sample
 ```
 
 The `traj.yaml` created by `traj init` enables every general operator of the built-in library, and the seven LLM operators share the `dialogue` call group.
 New data sources and new features are added as files: adapters in the project's `adapters/`, operators in the project's `operators/`, as the "Extension points" section of the design describes.
-A study in `studies/` states which trajectories succeed; `traj study pairs` draws contrast pairs to read, and `traj study screen` checks whether each feature is constant, redundant, differs between groups such as models, or explains success.
-The project also carries three skills: `traj-features` explains how features are defined and extracted, `traj-discover` proposes features from contrast pairs and verifies them, and `traj-report` writes reports.
+`traj extract` checks the configuration before it runs and reports, per execution group, how many trajectories have features.
+This repository carries two Claude Code skills in `.claude/skills/`: `traj-features` explains how features are defined and extracted, and `traj-report` writes reports.
+`traj init` copies them into every new analysis project.
 
-Every command prints JSON to stdout.
+`traj table` prints CSV to stdout, and every other command prints JSON.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 
 ## Development

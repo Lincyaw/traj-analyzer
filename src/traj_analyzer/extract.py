@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from uuid import uuid4
 from aifn import Call, Handle, Mailbox, Refused, Returned, Workspace
 
 from traj_analyzer.features.spec import ExtractRequest, value_validator
-from traj_analyzer.features.table import FeatureRow, write_group
+from traj_analyzer.features.table import FeatureRow, read_group, write_group
 from traj_analyzer.ingest import IndexRow, load_index, load_trajectory
 from traj_analyzer.operators.catalog import Group, Instance, load_groups
 from traj_analyzer.project import ConfigError, Project
@@ -117,6 +118,21 @@ def extract(
         if not dry_run:
             write_group(project, group.name, out)
     return [*code_reports, *reports.values()]
+
+
+def coverage(project: Project) -> dict[str, dict[str, int]]:
+    """Per enabled group, over every ingested trajectory: how many have rows in the feature table, counted by status,
+    and how many have none. A trajectory whose rows differ in status counts under its first status other than ok."""
+    keys = {row.key for row in load_index(project)}
+    report = {}
+    for group in load_groups(project):
+        statuses: dict[str, str] = {}
+        for row in read_group(project, group.name):
+            if row.key in keys and statuses.get(row.key, "ok") == "ok":
+                statuses[row.key] = row.status
+        report[group.name] = {"extracted": len(statuses), "missing": len(keys) - len(statuses),
+                              **Counter(statuses.values())}
+    return report
 
 
 def _scan(

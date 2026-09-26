@@ -210,14 +210,6 @@ def select(query: pd.DataFrame, where: str, thresholds: dict[str, dict[str, floa
     return query.query(expand_where(where, thresholds), engine="python")
 
 
-def evaluate(query: pd.DataFrame, expression: str, thresholds: dict[str, dict[str, float]]) -> pd.Series:
-    """One value per row of an expression over query columns, with `{feature.threshold}` expanded."""
-    values = query.eval(expand_where(expression, thresholds), engine="python")
-    if not isinstance(values, pd.Series):
-        raise ConfigError(f"Expression {expression!r} does not give one value per trajectory")
-    return values
-
-
 def _matches(
     strategy: StrategySpec, label: str, query: pd.DataFrame, thresholds: dict[str, dict[str, float]]
 ) -> set[str]:

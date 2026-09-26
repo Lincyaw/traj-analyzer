@@ -6,7 +6,7 @@ traj-analyzer analyses batches of LLM trajectories in any format.
 A set of enabled operators turns each trajectory into features, a sampler picks the few trajectories most worth reading in that feature space, and Claude Code reads them and writes an insight report.
 
 Both people and agents use it.
-Every command runs non-interactively, prints one JSON document to stdout, and writes logs to stderr.
+Every command runs non-interactively, prints one JSON document to stdout, or CSV for `traj table`, and writes logs to stderr.
 
 ## 2. Overall flow
 
@@ -15,10 +15,6 @@ flowchart TD
     raw[Raw files] -->|adapter| unified[Unified Trajectory]
     unified -->|render and chunk| md["&lt;id&gt;.md with step numbers and chunk markers"]
     library[Built-in library and project operators/] -->|traj operators enable| config["operators list in traj.yaml"]
-    study["studies/*.yaml: which trajectories succeed"] -->|traj study pairs| propose[Claude Code reads contrast pairs, writes candidate operators]
-    propose --> config
-    table -->|traj study screen, traj agreement| verify[Candidates kept or dropped]
-    verify --> config
     config -->|traj extract| table[Feature table, one file per execution group]
     md -->|traj extract| table
     table -->|vectorize| frame[Wide table and distance matrix]
@@ -31,8 +27,11 @@ The work splits into two layers:
 
 | Layer | Responsibility | Form |
 |---|---|---|
-| `traj` CLI | ingest, render, chunk, manage operators, schedule extraction, store, vectorize, sample, pick contrast pairs, screen features, measure agreement | Python package with deterministic steps, a typer application |
-| Claude Code skills | propose and verify features, write operators, read samples, write reports, feed findings back into operators and config | `.claude/skills/` of an analysis project |
+| `traj` CLI | ingest, render, chunk, manage operators, schedule extraction, store, vectorize, sample | Python package with deterministic steps, a typer application |
+| Claude Code skills | write operators, read samples, write reports, feed findings back into operators and config | `.claude/skills/` of the tool repository, copied into every analysis project by `traj init` |
+
+The skills are written once, in `.claude/skills/` of the tool repository.
+The project template `src/traj_analyzer/templates/project/claude/skills/` holds a symbolic link to each skill file, so the package ships their content, and a new skill file needs a link there as well.
 
 ## 3. Analysis project
 
@@ -42,12 +41,12 @@ An analysis project is a git repository created by `traj init <dir>`:
 | Path | Content | In git |
 |---|---|---|
 | `traj.yaml` | datasets, enabled operators, call groups, rendering, engine, extraction concurrency | yes |
+| `pyproject.toml` | optional; libraries the project's operators and adapters import, next to traj-analyzer itself, so `uv run traj` in the project uses them | yes |
 | `operators/**/*.py` | project operators, one per file | yes |
 | `samplers/<name>.yaml` | sampling strategies | yes |
-| `studies/<name>.yaml` | questions about which trajectories succeed, for proposing and verifying features | yes |
 | `adapters/*.py` | project adapters, one per file | yes |
 | `reports/*.md` | reports written by Claude Code | yes |
-| `.claude/skills/` | the skills `traj-features`, `traj-discover` and `traj-report` | yes |
+| `.claude/skills/` | the skills `traj-features` and `traj-report`, copied from the tool repository | yes |
 | `.traj/datasets/<dataset>/` | `<id>.json`, `<id>.md`, `index.jsonl` | no |
 | `.traj/instructions/` | instruction files generated for call groups | no |
 | `.traj/mailbox/` | aifn tasks and conclusions, which also serve as the cache | no |
@@ -154,7 +153,7 @@ An operator is a Python file that defines `OPERATOR`, an instance of `traj_analy
 Every feature is atomic: a yes or no, or a set copied from the text, readable directly from the text without multi-step reasoning.
 Questions answered by structured fields go to code operators; questions that need reading what a user or a model wrote go to LLM operators, for example "does the user correct the assistant".
 Conclusions that need judgement, such as "the agent locked onto a hypothesis too early", are not features; samplers or reports combine atomic features into them.
-The `traj-features` skill in the project template gives the full rules and examples.
+The `traj-features` skill gives the full rules and examples.
 An operator's name is its path relative to the operator root, so `user/corrects.py` is `user.corrects`.
 
 | Field | Meaning |
@@ -202,6 +201,7 @@ A feature is named with a noun, such as `tool_calls`, or with a noun and a verb,
 
 A project operator overrides a built-in operator of the same name.
 Files whose names start with an underscore are not operators and hold code shared by operators.
+Project operators useful across projects can move into the built-in library.
 
 The built-in library:
 
@@ -302,20 +302,25 @@ Values returned by code operators are checked against the same types, and a fail
 
 `traj extract` runs these steps:
 
-1. When there are LLM groups, check that every environment variable in `engine.env_passthrough` is set, and stop with an error if one is missing.
-2. Read each trajectory's JSON once: compute every code group, and decide for every instance of every LLM group whether it applies.
+1. Check `traj.yaml`, the enabled operators and every sampler under `samplers/`, and stop with an error if one is invalid.
+2. When there are LLM groups, check that every environment variable in `engine.env_passthrough` is set, and stop with an error if one is missing.
+3. Read each trajectory's JSON once: compute every code group, and decide for every instance of every LLM group whether it applies.
    Code values are checked against their feature types, with one validator built per feature.
-3. For each LLM group, trajectories with no applicable instance get no model call; every other trajectory gets one task, and tasks with an earlier conclusion reuse it.
-4. When tasks are outstanding, start `extract.workers` subprocesses `python -m aifn worker traj_analyzer.runtime:make_worker --once`.
+   `extract.code_workers` processes (8 by default) share this work; each loads the project from disk and the operators with it.
+4. For each LLM group, trajectories with no applicable instance get no model call; every other trajectory gets one task, and tasks with an earlier conclusion reuse it.
+5. When tasks are outstanding, start `extract.workers` subprocesses `python -m aifn worker traj_analyzer.runtime:make_worker --once`.
    Workers find the project through the environment variable `TRAJ_PROJECT` and build the same functions from the same configuration.
    Workers exit when the queue is empty, and any worker exiting with a non-zero code stops the command with an error.
-5. Read every conclusion and write `.traj/features/<group>.jsonl`, one line `{key, group, feature, value, evidence, status, detail}` per feature.
+6. Read every conclusion and write `.traj/features/<group>.jsonl`, one line `{key, group, feature, value, evidence, status, detail}` per feature.
    When the operator does not apply, `value` is empty and `detail` is `not applicable`.
    Refusals have status `refused`, execution failures `failed`, and per-chunk vectors whose length differs from the chunk count `invalid_length`.
+
+The output reports each group of the run, and `coverage`: per enabled group, over every ingested trajectory, how many have rows in the feature table (`extracted`), those rows counted by status, and how many have none (`missing`).
 
 The feature table always holds what the last `traj extract` wrote: rows of the trajectories in that run are replaced, and other rows stay.
 After changing operators or configuration, or re-ingesting data, run `traj extract` again to refresh it: code groups are always recomputed at little cost, and LLM groups call the model only for what changed.
 `traj extract --dry-run` only looks up the cache, writes no tasks and leaves the feature table alone; for LLM groups, its `pending` count is the number of model calls a run would make.
+It still writes each LLM group's instruction to `.traj/instructions/<group>.md`, so the instruction can be read before any model call.
 Every worker run processes every unfinished task in the mailbox, including tasks left by an interrupted run.
 
 ### 5.8 Model configuration
@@ -349,52 +354,6 @@ A model behind an OpenAI-compatible endpoint is reached through a patch on the `
 The matching `engine` configuration is `provider: litellm`, `model: DeepSeek-V4-flash`, `env_passthrough: [LITELLM_API_KEY, LITELLM_BASE_URL]` and `patches: [engine/litellm.patch.yml]`.
 Endpoints and keys arrive through environment variables and are never written into project files.
 
-### 5.9 Proposing and verifying features
-
-Features are proposed and verified against a study.
-A study is a file `studies/<name>.yaml` holding one question about which trajectories succeed:
-
-```yaml
-description: Among runs that named a true root-cause service, what separates those that also named its fault kind.
-where: "any_service_hit == 1"
-target: "any_root_cause_hit == 1"
-by: [model, case_id]
-outcomes: [eval, rc_services, gt_fault_kinds, submitted_fault_kinds]
-pairs: {within: case_id, spread: system, distinct: model, n: 5}
-```
-
-| Field | Meaning |
-|---|---|
-| `where` | condition selecting the study population, with `{feature.threshold}` expanded as in samplers |
-| `target` | expression that is true for the trajectories that succeed |
-| `by` | features whose influence the screen removes, such as the model and the task |
-| `outcomes` | feature names, operator instance ids or glob patterns of outcome features; they are never screened and never count as duplicates |
-| `pairs` | how contrast pairs are drawn: `within` the shared feature, `spread` the feature pairs take turns over, `distinct` the feature whose values appear in at most one pair, `n` the count |
-| `rules` | thresholds of the screen |
-
-`traj study pairs <name>` draws contrast pairs: groups of trajectories sharing the value of `within` come in a seeded random order, taking turns over the values of `spread`, and each group gives one trajectory that succeeded and one that did not.
-Reading the two runs of a pair side by side shows where the failed one parted from the successful one, and each such difference becomes a candidate feature.
-
-`traj study screen <name>` checks features on the study population, working on percentile ranks of their numeric columns; a category uses its one-hot columns:
-
-| Check | A column passes when |
-|---|---|
-| present | at least `min_present` trajectories have a value (default 100) |
-| constant | its most common value covers at most `max_mode_share` of them (default 0.95) |
-| redundant | its absolute rank correlation with every column of another feature stays below `max_similarity` (default 0.8); that feature is not screened or screened earlier, so of two duplicates only the later one is redundant |
-| varies by | the means of a `by` group explain at least `min_group_excess` more of its variance than random groups of the same count (default 0.05) |
-| explains success | after removing the mean of every `by` group from the column and from success, their correlation reaches `min_within_r` in absolute value (default 0.05) |
-
-Each feature gets the verdict of its best column: `explains_success`, `varies_by`, `uninformative`, `redundant`, `constant` or `too_few`.
-A feature with `varies_by` describes the groups, such as the style of a model, and says nothing about success within a group.
-
-`traj agreement <reference.json>` checks LLM features against answers from a careful reader.
-The reference maps trajectory keys to feature values; the command reports per feature the answers compared, how many match, the mean Jaccard similarity for sets, and every mismatch with the extractor's evidence.
-
-The `traj-discover` skill runs the loop: write a study, screen the existing features, read contrast pairs, propose atomic candidates, write them as operators, verify them with the screen and the agreement check, and commit what passes.
-Without a notion of success, `traj discover` offers diverse reading instead: it samples with one strategy, by default diversity over the features of every code group, and lists the rendered files.
-Project operators useful across projects can move into the built-in library.
-
 ## 6. Sampling
 
 ### 6.1 Vectorization
@@ -411,7 +370,7 @@ Each feature expands into columns of the wide table:
 
 Category, set and map features without `labels` use the 100 most frequent labels as columns.
 The wide table reads the enabled features from the feature table and takes only values with status `ok`; rows with other statuses are empty in the wide table.
-`traj status` counts, per group, the trajectories with rows (`extracted`), those without (`missing`), and the rows by status.
+`traj table` prints its query columns as CSV, one row per trajectory.
 Distance columns are standardized, and missing values are filled with the column mean.
 Each feature's weight is divided by the square root of its column count, so features with many columns do not dominate distances.
 
@@ -459,12 +418,12 @@ Each pick holds the key, the rendered file, the strategy, the reason, and every 
 
 The `traj-report` skill guides Claude Code through these steps:
 
-1. Run `traj extract` for the groups the sampler uses, and check with `traj status` that they have no `missing` trajectories.
-2. Run `traj table --format describe` for the overall distributions.
+1. Run `traj extract` for the groups the sampler uses, and check in its `coverage` that they have no `missing` trajectories.
+2. Write `traj table` to a CSV file and read it with pandas for the overall distributions.
 3. Run `traj sample` for the picks and their reasons.
 4. Read the picked trajectories and check their feature values.
 5. Write `reports/<date>-<topic>.md`, citing trajectory keys and step numbers for every finding.
-6. Write the resulting changes to operators, enabled configuration and samplers, run `traj validate`, and commit them with the report, naming the report in the commit message.
+6. Write the resulting changes to operators, enabled configuration and samplers, run `traj extract`, which checks them first, and commit them with the report, naming the report in the commit message.
 
 ## 8. CLI
 
@@ -477,17 +436,9 @@ The `traj-report` skill guides Claude Code through these steps:
 | `traj operators show <name>` | show an operator's parameters, defaults, outputs, guidance and file |
 | `traj operators enable <name> [--as a] [--prefix p] [--call c] [--param k=v...]` | enable an operator in `traj.yaml`, keeping the file's comments and layout |
 | `traj operators disable <name>` | remove the entries whose operator or instance name is `<name>` from `traj.yaml` |
-| `traj validate [--instructions]` | check the configuration, every group, sampler and study, and print the generated output schemas |
-| `traj discover [--n 20] [--method diversity\|random] [--group g...]` | pick a diverse sample to read |
-| `traj study list` | list the studies |
-| `traj study pairs <name> [--n k] [--seed s]` | draw contrast pairs for a study |
-| `traj study screen <name> [--feature f...]` | screen features on a study population |
-| `traj agreement <reference.json>` | compare reference answers with extracted features |
-| `traj extract [--group g] [--dataset d] [--key k] [--limit n] [--workers n] [--dry-run]` | extract features |
-| `traj table [--format json\|csv\|describe] [--column c...]` | print the wide table |
+| `traj extract [--group g] [--dataset d] [--key k] [--limit n] [--workers n] [--dry-run]` | check the configuration and samplers, extract features, and report coverage per group |
+| `traj table [--dataset d] [--column c...]` | print the wide table as CSV |
 | `traj sample [--sampler default] [--budget n]` | sample |
-| `traj show <key> [--cat]` | print a trajectory's rendered file and features, or its rendered content |
-| `traj status` | print dataset sizes and extraction coverage per group |
 
 Options that take several values repeat, such as `--group a --group b`.
 `operators enable` and `operators disable` validate the whole modified configuration before writing `traj.yaml`.
@@ -502,7 +453,6 @@ The pipeline of ingestion, rendering, extraction, caching, vectorization and sam
 | a data source | an adapter file `<name>.py` | the project's `adapters/`; general ones in `traj_analyzer/adapters/` of the package | defines the class `ADAPTER`, constructed from `datasets.<name>.options`; `read(path, dataset)` returns trajectories |
 | features | an operator file `<namespace>/<name>.py` | the project's `operators/`; general ones in `traj_analyzer/operators/library/` of the package | defines `OPERATOR`; `outputs` returns `FeatureSpec` of the six feature types |
 | a sampling scheme | a sampler file `<name>.yaml` | the project's `samplers/` | `SamplerSpec` |
-| a question for feature work | a study file `<name>.yaml` | the project's `studies/` | `StudySpec` |
 
 Adapters and operators meet only through the Trajectory.
 When project operators depend on conventions of an adapter, such as metadata keys or the `name` of special steps, those conventions are constants in the adapter file and appear in the dataset description.

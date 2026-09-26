@@ -129,10 +129,6 @@ class Project:
         return self.root / "samplers"
 
     @property
-    def studies_dir(self) -> Path:
-        return self.root / "studies"
-
-    @property
     def instructions_dir(self) -> Path:
         return self.data_dir / "instructions"
 

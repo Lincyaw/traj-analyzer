@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -7,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pytest
 from aifn import Worker
 from aifn.engines import ReplayEngine
@@ -18,7 +20,6 @@ from traj_analyzer.adapters.messages import MessagesAdapter
 from traj_analyzer.cli import main
 from traj_analyzer.extract import extract
 from traj_analyzer.features.spec import output_model, render_instruction
-from traj_analyzer.features.table import read_group
 from traj_analyzer.ingest import ingest, load_index, render_markdown
 from traj_analyzer.operators.base import FeatureSpec, Operator
 from traj_analyzer.operators.catalog import discover, load_groups
@@ -154,6 +155,18 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
     return loaded
 
 
+def test_init_copies_the_repository_skills(tmp_path: Path) -> None:
+    assert main(["init", str(tmp_path)]) == 0
+    source = Path(__file__).parents[1] / ".claude" / "skills"
+    copied = tmp_path / ".claude" / "skills"
+    names = sorted(p.relative_to(source) for p in source.rglob("*") if p.is_file())
+    assert names
+    assert sorted(p.relative_to(copied) for p in copied.rglob("*") if p.is_file()) == names
+    for name in names:
+        assert not (copied / name).is_symlink()
+        assert (copied / name).read_bytes() == (source / name).read_bytes()
+
+
 def test_groups_follow_enabled_operators(project: Project) -> None:
     groups = {g.name: g for g in load_groups(project)}
     assert set(groups) == {"stats-basic", "stats-tool_usage", "fixture-tool_share", "outcome"}
@@ -255,8 +268,6 @@ def test_llm_extraction_replays_real_runs(project: Project, tmp_path: Path) -> N
     assert frame.query["frustration"].between(0, 1).all()
     assert set(frame.query["task_type"]) <= {"lookup", "creative", "other"}
     assert {"curve__t3", "time_split__tools"} <= set(frame.distance.columns)
-    for key in keys:
-        assert main(["show", key]) == 0
 
 
 def test_llm_operators_skip_trajectories_they_do_not_apply_to(project: Project, tmp_path: Path) -> None:
@@ -278,17 +289,25 @@ def test_complete_population_excludes_missing_features(project: Project, tmp_pat
     assert sample(spec.model_copy(update={"population": "all"}), frame, groups).population == 70
 
 
-def test_cli_discover_and_sample(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_extract_table_and_sample(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["extract", "--group", "stats-basic", "--group", "stats-tool_usage",
                  "--group", "fixture-tool_share"]) == 0
     capsys.readouterr()
-    assert main(["discover", "--n", "5"]) == 0
-    discovered = json.loads(capsys.readouterr().out)
-    assert len(discovered["trajectories"]) == 5
-    assert all(Path(t["markdown"]).is_file() for t in discovered["trajectories"])
+    assert main(["table", "--dataset", "toucan", "--column", "n_steps", "--column", "tool_calls__count"]) == 2
+    assert main(["table", "--dataset", "toucan", "--column", "n_steps", "--column", "n_tool_calls"]) == 0
+    table = pd.read_csv(io.StringIO(capsys.readouterr().out), index_col="key")
+    assert list(table.columns) == ["n_steps", "n_tool_calls"] and len(table) == 30
     assert main(["sample", "--budget", "6"]) == 0
     selection = json.loads(capsys.readouterr().out)
     assert len(selection["picks"]) == 6 and Path(selection["selection"]).is_file()
+
+
+def test_cli_extract_checks_samplers(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
+    (project.root / "samplers" / "broken.yaml").write_text("name: broken\nbudget: 0\nstrategies: []\n",
+                                                          encoding="utf-8")
+    assert main(["extract", "--group", "stats-basic"]) == 2
+    assert "SamplerSpec" in capsys.readouterr().err
+    assert not (project.table_dir / "stats-basic.jsonl").exists()
 
 
 def test_cli_operators_enable_and_disable(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
@@ -389,95 +408,12 @@ def test_llm_answers_are_reused_only_for_the_same_content_and_model(project: Pro
     assert (changed.cached, changed.pending) == (0, 3)
 
 
-def test_status_counts_rows_by_status(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
-    extract(project, groups=["fixture-tool_share"], datasets=["toucan"])
+def test_extract_reports_coverage_by_status(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
     capsys.readouterr()
-    assert main(["status"]) == 0
-    status = json.loads(capsys.readouterr().out)
-    assert status["datasets"] == {"toucan": 30, "ultrachat": 40}
-    assert status["groups"]["fixture-tool_share"] == {"operators": ["fixture.tool_share"], "extracted": 30,
-                                                      "missing": 40, "ok": 30}
-
-
-def _with_shape(project: Project, study: dict[str, Any]) -> None:
-    assert main(["operators", "enable", "fixture.shape"]) == 0
-    (project.root / "studies" / "long.yaml").write_text(json.dumps(study), encoding="utf-8")
-    assert main(["extract", "--group", "stats-basic", "--group", "stats-tool_usage", "--group", "fixture-tool_share",
-                 "--group", "fixture-shape"]) == 0
-
-
-LONG = {"target": "total_chars >= 4000", "by": ["source"], "outcomes": ["total_chars"],
-        "pairs": {"within": "turn_band", "n": 3}, "rules": {"min_present": 10}}
-
-
-def test_study_screen_reports_verdicts(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
-    _with_shape(project, LONG)
-    capsys.readouterr()
-    assert main(["study", "screen", "long"]) == 0
-    report = json.loads(capsys.readouterr().out)
-    assert report["population"] == 70
-    features = report["features"]
-    assert "total_chars" not in features and "source" not in features
-    # Only toucan has tool results, and every one of them succeeded.
-    assert features["tool_error_rate"]["verdict"] == "constant"
-    # 70 rows give ten or fewer durations, since only the Claude Code adapter records timestamps.
-    assert features["duration_minutes"]["verdict"] == "too_few"
-    # n_user_turns counts user turns, which turn_band puts in bands; the feature screened later is the redundant one.
-    assert features["n_user_turns"]["verdict"] != "redundant"
-    band = features["turn_band"]["columns"]["turn_band__one"]
-    assert band["redundant"] and band["most_similar"][0] in {"n_user_turns", "n_tool_calls", "n_steps"}
-    assert band["by"]["source"]["excess"] > 0.5
-    n_steps = features["n_steps"]["columns"]["n_steps"]
-    assert n_steps["r_success"] is not None and n_steps["r_success_within"] is not None
-
-    capsys.readouterr()
-    assert main(["study", "screen", "long", "--feature", "no_such_feature"]) == 2
-
-
-def test_study_pairs_share_the_within_feature(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
-    _with_shape(project, LONG)
-    capsys.readouterr()
-    assert main(["study", "pairs", "long"]) == 0
-    pairs = json.loads(capsys.readouterr().out)["pairs"]
-    assert len(pairs) == 3
-    frame = build_frame(project, load_groups(Project.load(project.root)), load_index(project), vector_length=4)
-    for pair in pairs:
-        succeeded, failed = pair["succeeded"]["key"], pair["failed"]["key"]
-        assert frame.query.at[succeeded, "turn_band"] == frame.query.at[failed, "turn_band"] == pair["turn_band"]
-        assert frame.query.at[succeeded, "total_chars"] >= 4000 > frame.query.at[failed, "total_chars"]
-        assert Path(pair["failed"]["markdown"]).is_file()
-
-    study = {**LONG, "pairs": {"within": "source", "distinct": "turn_band", "n": 5}}
-    (project.root / "studies" / "long.yaml").write_text(json.dumps(study), encoding="utf-8")
-    assert main(["study", "pairs", "long"]) == 0
-    distinct = json.loads(capsys.readouterr().out)["pairs"]
-    bands = [{frame.query.at[p[side]["key"], "turn_band"] for side in ["succeeded", "failed"]} for p in distinct]
-    # Both sources have trajectories of either outcome, and no band appears in two pairs.
-    assert len(distinct) == 2
-    assert not bands[0] & bands[1]
-
-
-def test_agreement_compares_reference_answers(project: Project, tmp_path: Path,
-                                              capsys: pytest.CaptureFixture[str]) -> None:
-    keys = _recorded_keys(project)
-    extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "replay"))
-    rows = {(r.key, r.feature): r for r in read_group(project, "outcome")}
-    reference = {key: {"task_type": rows[(key, "task_type")].value,
-                       "time_split": {"value": rows[(key, "time_split")].value, "steps": []}} for key in keys}
-    wrong = next(label for label in ["lookup", "creative", "other"] if label != reference[keys[0]]["task_type"])
-    reference[keys[0]]["task_type"] = wrong
-    path = tmp_path / "reference.json"
-    path.write_text(json.dumps(reference), encoding="utf-8")
-    capsys.readouterr()
-    assert main(["agreement", str(path)]) == 0
-    features = json.loads(capsys.readouterr().out)["features"]
-    assert features["task_type"]["compared"] == len(keys)
-    assert features["task_type"]["equal"] == len(keys) - 1
-    assert [m["key"] for m in features["task_type"]["mismatches"]] == [keys[0]]
-    assert features["time_split"]["agreement"] == 1.0
-
-    path.write_text(json.dumps({keys[0]: {"no_such_feature": True}}), encoding="utf-8")
-    assert main(["agreement", str(path)]) == 2
+    assert main(["extract", "--group", "fixture-tool_share", "--dataset", "toucan"]) == 0
+    coverage = json.loads(capsys.readouterr().out)["coverage"]
+    assert coverage["fixture-tool_share"] == {"extracted": 30, "missing": 40, "ok": 30}
+    assert coverage["stats-basic"] == {"extracted": 0, "missing": 70}
 
 
 def test_dry_run_writes_nothing(project: Project) -> None:

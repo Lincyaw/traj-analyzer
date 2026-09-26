@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import shutil
 import sys
-from collections import Counter
 from dataclasses import asdict
 from enum import StrEnum
 from importlib.resources import as_file, files
@@ -15,30 +14,17 @@ from pydantic import ValidationError
 from ruamel.yaml import YAML
 
 from traj_analyzer.adapters import discover_adapters
-from traj_analyzer.agreement import agreement
-from traj_analyzer.extract import extract
-from traj_analyzer.features.spec import output_model, render_instruction
-from traj_analyzer.features.table import read_group
+from traj_analyzer.extract import coverage, extract
 from traj_analyzer.files import parse_yaml
 from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.operators.catalog import discover, load_groups
 from traj_analyzer.project import CONFIG_FILE, Config, ConfigError, Project
-from traj_analyzer.sampling import SamplerSpec, StrategySpec, enrich, load_sampler, sample, save
-from traj_analyzer.studies import (
-    Population,
-    StudySpec,
-    check_study,
-    contrast_pairs,
-    list_studies,
-    load_study,
-    population,
-    screen,
-)
+from traj_analyzer.sampling import enrich, load_sampler, sample, save
 from traj_analyzer.vectorize import Frame, build_frame
 
 DESCRIPTION = """\
 Batch analysis of LLM trajectories.
-Every command prints one JSON document to stdout, and logs go to stderr.
+Every command except `table` prints one JSON document to stdout, and logs go to stderr.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 """
 
@@ -48,11 +34,8 @@ _DOTTED = {"gitignore": ".gitignore", "claude": ".claude"}
 app = typer.Typer(help=DESCRIPTION, no_args_is_help=True, add_completion=False, pretty_exceptions_enable=False)
 adapters_app = typer.Typer(help="Data sources.", no_args_is_help=True)
 operators_app = typer.Typer(help="Browse, enable and disable operators.", no_args_is_help=True)
-study_app = typer.Typer(help="Questions about which trajectories succeed and which features tell why.",
-                        no_args_is_help=True)
 app.add_typer(adapters_app, name="adapters")
 app.add_typer(operators_app, name="operators")
-app.add_typer(study_app, name="study")
 
 Datasets = Annotated[list[str] | None, typer.Option("--dataset", help="Restrict to this dataset; repeatable.")]
 
@@ -60,17 +43,6 @@ Datasets = Annotated[list[str] | None, typer.Option("--dataset", help="Restrict 
 class OperatorKind(StrEnum):
     code = "code"
     llm = "llm"
-
-
-class DiscoverMethod(StrEnum):
-    diversity = "diversity"
-    random = "random"
-
-
-class TableFormat(StrEnum):
-    json = "json"
-    csv = "csv"
-    describe = "describe"
 
 
 def _emit(data: Any) -> None:
@@ -102,33 +74,6 @@ def cmd_init(directory: Annotated[str, typer.Argument(help="Directory of the new
 def cmd_ingest(datasets: Annotated[list[str] | None, typer.Argument(help="Datasets; default all.")] = None) -> None:
     """Read raw data into the unified form."""
     _emit({"ingested": ingest(Project.find(), datasets or None)})
-
-
-@app.command("validate")
-def cmd_validate(instructions: Annotated[bool, typer.Option(help="Include rendered instructions.")] = False) -> None:
-    """Check traj.yaml, enabled operators, samplers and studies."""
-    project = Project.find()
-    groups = load_groups(project)
-    report: dict[str, Any] = {"datasets": list(project.config.datasets), "groups": []}
-    for group in groups:
-        entry: dict[str, Any] = {
-            "group": group.name, "kind": group.kind, "operators": [i.id for i in group.instances],
-            "features": [f.name for f in group.features],
-        }
-        if not group.is_code:
-            entry["output_schema"] = output_model(group).model_json_schema()
-            if instructions:
-                entry["instruction"] = render_instruction(group)
-        report["groups"].append(entry)
-    samplers = sorted(p.stem for p in project.samplers_dir.glob("*.yaml"))
-    for name in samplers:
-        load_sampler(project, name)
-    report["samplers"] = samplers
-    studies = list_studies(project)
-    for name in studies:
-        check_study(load_study(project, name), groups)
-    report["studies"] = studies
-    _emit(report)
 
 
 def _enabled(project: Project) -> dict[str, list[str]]:
@@ -252,36 +197,9 @@ def cmd_operators_disable(name: str) -> None:
     _emit({"operators": _edit_operators(project, remove)})
 
 
-def _frame(project: Project, datasets: list[str] | None, groups: list[str] | None = None) -> Frame:
-    return build_frame(project, load_groups(project, groups), load_index(project, datasets),
+def _frame(project: Project, datasets: list[str] | None) -> Frame:
+    return build_frame(project, load_groups(project), load_index(project, datasets),
                        project.config.sampling.vector_length)
-
-
-@app.command("discover")
-def cmd_discover(
-    n: Annotated[int, typer.Option(help="Trajectories to pick.")] = 20,
-    seed: int = 0,
-    dataset: Datasets = None,
-    method: Annotated[DiscoverMethod, typer.Option(help="How to pick.")] = DiscoverMethod.diversity,
-    group: Annotated[list[str] | None, typer.Option(help="Groups whose features drive diversity; default all code "
-                                                         "groups; repeatable.")] = None,
-) -> None:
-    """Pick trajectories to read when proposing features, sampling over the features of code groups."""
-    project = Project.find()
-    groups = group or [g.name for g in load_groups(project) if g.is_code]
-    frame = _frame(project, dataset, groups)
-    if not frame.columns:
-        raise ConfigError(f"Groups {groups} have no extracted values; run `traj extract` for them first")
-    spec = SamplerSpec(name="discover", budget=n, seed=seed, datasets=dataset,
-                       strategies=[StrategySpec(kind=method, quota="rest")])
-    result = sample(spec, frame, load_groups(project, groups))
-    rows = {row.key: row for row in load_index(project, dataset)}
-    _emit({"method": method, "population": result.population, "trajectories": [
-        {"key": pick.key, "markdown": str(project.trajectory_path(pick.key, ".md")),
-         "n_steps": rows[pick.key].n_steps, "chars": rows[pick.key].chars, "reason": pick.reason,
-         "metadata": rows[pick.key].metadata}
-        for pick in result.picks
-    ]})
 
 
 @app.command("extract")
@@ -293,31 +211,28 @@ def cmd_extract(
     workers: Annotated[int | None, typer.Option(help="Worker processes for LLM groups.")] = None,
     dry_run: Annotated[bool, typer.Option(help="Only look up the cache.")] = False,
 ) -> None:
-    """Compute features."""
-    reports = extract(Project.find(), groups=group, datasets=dataset, keys=key, limit=limit, workers=workers,
+    """Check traj.yaml, the operators and every sampler, compute features, and report coverage per group."""
+    project = Project.find()
+    for path in sorted(project.samplers_dir.glob("*.yaml")):
+        load_sampler(project, path.stem)
+    reports = extract(project, groups=group, datasets=dataset, keys=key, limit=limit, workers=workers,
                       dry_run=dry_run)
-    _emit({"dry_run": dry_run, "groups": [asdict(r) for r in reports]})
+    _emit({"dry_run": dry_run, "groups": [asdict(r) for r in reports], "coverage": coverage(project)})
 
 
 @app.command("table")
 def cmd_table(
     dataset: Datasets = None,
     column: Annotated[list[str] | None, typer.Option(help="Column to print; repeatable.")] = None,
-    format: Annotated[TableFormat, typer.Option(help="Output format.")] = TableFormat.json,
 ) -> None:
-    """Print the wide feature table."""
+    """Print the wide feature table as CSV, one row per trajectory."""
     table = _frame(Project.find(), dataset).query
     if column:
         missing = sorted(set(column) - set(table.columns))
         if missing:
             raise ConfigError(f"Unknown columns: {missing}")
         table = table[column]
-    if format is TableFormat.csv:
-        table.to_csv(sys.stdout)
-    elif format is TableFormat.describe:
-        _emit(json.loads(table.describe(include="all").to_json()))
-    else:
-        _emit(json.loads(table.reset_index().to_json(orient="records", force_ascii=False)))
+    table.to_csv(sys.stdout)
 
 
 @app.command("sample")
@@ -337,118 +252,6 @@ def cmd_sample(sampler: Annotated[str, typer.Option(help="Sampler name under sam
     }
     path = save(project, spec, selection)
     _emit({"selection": str(path), **selection})
-
-
-@app.command("show")
-def cmd_show(key: str, cat: Annotated[bool, typer.Option(help="Print the rendered Markdown.")] = False) -> None:
-    """One trajectory's rendered file and features."""
-    project = Project.find()
-    path = project.trajectory_path(key, ".md")
-    if not path.is_file():
-        raise ConfigError(f"No trajectory {key}")
-    if cat:
-        sys.stdout.write(path.read_text(encoding="utf-8"))
-        return
-    features = {}
-    for group in load_groups(project):
-        for row in read_group(project, group.name):
-            if row.key == key:
-                features[row.feature] = row.model_dump(exclude={"key", "feature"})
-    _emit({"key": key, "markdown": str(path), "features": features})
-
-
-@app.command("status")
-def cmd_status() -> None:
-    """Trajectories per dataset, and per group how many have rows in the feature table, by status.
-
-    The table holds what the last `traj extract` wrote; after changing data or operators, run it again.
-    """
-    project = Project.find()
-    index = load_index(project)
-    keys = {row.key for row in index}
-    groups = {}
-    for group in load_groups(project):
-        statuses: dict[str, str] = {}
-        for row in read_group(project, group.name):
-            if row.key in keys and statuses.get(row.key, "ok") == "ok":
-                statuses[row.key] = row.status
-        groups[group.name] = {"operators": [i.id for i in group.instances], "extracted": len(statuses),
-                              "missing": len(keys) - len(statuses), **Counter(statuses.values())}
-    _emit({"project": str(project.root), "datasets": dict(Counter(row.dataset for row in index)),
-           "groups": groups})
-
-
-@study_app.command("list")
-def cmd_study_list() -> None:
-    """Studies under studies/."""
-    project = Project.find()
-    _emit({"studies": [load_study(project, name).model_dump() for name in list_studies(project)]})
-
-
-@study_app.command("pairs")
-def cmd_study_pairs(name: str, n: Annotated[int | None, typer.Option(help="Override pairs.n.")] = None,
-                    seed: int = 0) -> None:
-    """Contrast pairs: trajectories sharing the `within` feature, one that succeeded and one that did not."""
-    project, study, _, data = _study(name)
-    if study.pairs is None:
-        raise ConfigError(f"Study {name} has no pairs section")
-    spec = study.pairs.model_copy(update={"n": n}) if n else study.pairs
-    pairs = contrast_pairs(spec, data, seed)
-    for pair in pairs:
-        for side in ["succeeded", "failed"]:
-            pair[side] = {"key": pair[side], "markdown": str(project.trajectory_path(pair[side], ".md"))}
-    _emit({**_summary(study, data), "pairs": pairs})
-
-
-def _study(name: str) -> tuple[Project, StudySpec, set[str], Population]:
-    """The project, the checked study, its outcome features and its population."""
-    project = Project.find()
-    study = load_study(project, name)
-    groups = load_groups(project)
-    outcomes = check_study(study, groups)
-    return project, study, outcomes, population(study, _frame(project, study.datasets), groups)
-
-
-def _summary(study: StudySpec, data: Population) -> dict[str, Any]:
-    success = data.success.dropna().astype(float)
-    return {"study": study.name, "population": len(data.success),
-            "success_rate": round(float(success.mean()), 3) if len(success) else None}
-
-
-@study_app.command("screen")
-def cmd_study_screen(
-    name: str,
-    feature: Annotated[list[str] | None, typer.Option(help="Feature to screen; default every enabled feature "
-                                                           "except outcomes and by; repeatable.")] = None,
-) -> None:
-    """Check features on the study population: constant, redundant, varying by a `by` feature, or explaining
-    success once the `by` features are held fixed."""
-    _, study, outcomes, data = _study(name)
-    features = feature or [f for f in data.frame.numeric_columns if f not in outcomes and f not in study.by]
-    report = screen(study, data, features, outcomes)
-    verdicts: dict[str, list[str]] = {}
-    for feature_name, entry in report.items():
-        verdicts.setdefault(entry["verdict"], []).append(feature_name)
-    _emit({**_summary(study, data), "rules": study.rules.model_dump(), "verdicts": verdicts, "features": report})
-
-
-@app.command("agreement")
-def cmd_agreement(reference: Annotated[str, typer.Argument(
-        help="JSON {key: {feature: value}} written by a careful reader.")]) -> None:
-    """Compare reference answers with the extracted features."""
-    project = Project.find()
-    answers = json.loads(Path(reference).read_text(encoding="utf-8"))
-    named = {feature for values in answers.values() for feature in values}
-    groups = load_groups(project)
-    specs = {f.name: f for g in groups for f in g.features}
-    rows = {}
-    for group in groups:
-        if named.isdisjoint(f.name for f in group.features):
-            continue
-        for row in read_group(project, group.name):
-            if row.key in answers:
-                rows[(row.key, row.feature)] = row
-    _emit({"reference": reference, "features": agreement(answers, specs, rows)})
 
 
 def main(argv: list[str] | None = None) -> int:
