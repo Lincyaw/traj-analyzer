@@ -194,6 +194,7 @@ def _edit_operators(project: Project, change: Any) -> list[dict[str, Any]]:
     path = project.root / CONFIG_FILE
     editor = YAML()
     editor.preserve_quotes = True
+    editor.width = 4096
     editor.indent(mapping=2, sequence=4, offset=2)
     editor.representer.add_representer(
         type(None), lambda representer, _: representer.represent_scalar("tag:yaml.org,2002:null", "null"))

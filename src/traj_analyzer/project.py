@@ -47,6 +47,9 @@ class EngineConfig(_Strict):
 
 class ExtractConfig(_Strict):
     workers: int = Field(default=4, ge=1)
+    """aifn worker processes for LLM groups."""
+    code_workers: int = Field(default=8, ge=1)
+    """Processes that load trajectories and compute code groups."""
     timeout_s: float = Field(default=900.0, gt=0)
     attempts: int = Field(default=2, ge=1)
 

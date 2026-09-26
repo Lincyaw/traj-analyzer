@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -121,28 +125,14 @@ def _scan(
     """Load each trajectory once to compute every code group and decide which LLM operators apply to it."""
     reports = {g.name: GroupReport(g.name, total=len(rows)) for g in code}
     applies: dict[str, dict[str, dict[str, bool]]] = {g.name: {} for g in llm}
-    needs_trajectory = (code and not dry_run) or any(
-        i.ref.operator.requires is not None for g in llm for i in g.instances)
-    validators = {f.name: value_validator(f) for g in code for f in g.features}
     out: dict[str, list[FeatureRow]] = {g.name: [] for g in code}
-    for row in rows:
-        trajectory = load_trajectory(project, row.key) if needs_trajectory else None
-        for group in llm:
-            applies[group.name][row.key] = {
-                i.id: trajectory is None or i.applies(trajectory) for i in group.instances}
-        if dry_run:
-            continue
-        for group in code:
-            (instance,) = group.instances
-            assert trajectory is not None
-            if not instance.applies(trajectory):
-                reports[group.name].not_applicable += 1
-                out[group.name] += _not_applicable(group, instance, row.key)
-                continue
-            values = instance.compute(trajectory)
-            out[group.name] += [FeatureRow(key=row.key, group=group.name, feature=f.name,
-                                           value=validators[f.name](values[f.name])) for f in instance.features]
-            reports[group.name].ok += 1
+    for key, applied, computed in _scan_results(project, code, llm, rows, dry_run):
+        for name, flags in applied.items():
+            applies[name][key] = flags
+        for name, feature_rows in computed.items():
+            reports[name].ok += feature_rows[0].detail != NOT_APPLICABLE
+            reports[name].not_applicable += feature_rows[0].detail == NOT_APPLICABLE
+            out[name] += feature_rows
     for group in code:
         if dry_run:
             reports[group.name].pending = len(rows)
@@ -151,8 +141,67 @@ def _scan(
     return list(reports.values()), applies
 
 
+def _scan_results(
+    project: Project, code: list[Group], llm: list[Group], rows: list[IndexRow], dry_run: bool
+) -> Iterator[tuple[str, dict[str, dict[str, bool]], dict[str, list[FeatureRow]]]]:
+    """Per trajectory, in order: which LLM operators apply, and the rows of every code group.
+
+    Trajectories are loaded in `extract.code_workers` processes, each of which loads the project from disk.
+    """
+    needs_trajectory = (code and not dry_run) or any(
+        i.ref.operator.requires is not None for g in llm for i in g.instances)
+    if not needs_trajectory:
+        for row in rows:
+            yield row.key, {g.name: {i.id: True for i in g.instances} for g in llm}, {}
+        return
+    state = (str(project.root), [g.name for g in code], [g.name for g in llm], dry_run)
+    keys = [row.key for row in rows]
+    processes = project.config.extract.code_workers
+    if processes == 1:
+        _start_scan(*state)
+        yield from map(_scan_one, keys)
+        return
+    # forkserver: forking this process, which may run threads, can deadlock the children.
+    context = multiprocessing.get_context("forkserver")
+    with ProcessPoolExecutor(max_workers=processes, mp_context=context, initializer=_start_scan,
+                             initargs=state) as pool:
+        yield from pool.map(_scan_one, keys, chunksize=64)
+
+
+_SCAN: dict[str, Any] = {}
+"""The groups one scanning process works with, set by `_start_scan`."""
+
+
+def _start_scan(root: str, code: list[str], llm: list[str], dry_run: bool) -> None:
+    project = Project.load(Path(root))
+    groups = {g.name: g for g in load_groups(project)}
+    _SCAN.update(project=project, code=[groups[n] for n in code], llm=[groups[n] for n in llm], dry_run=dry_run,
+                 validators={f.name: value_validator(f) for n in code for f in groups[n].features})
+
+
+def _scan_one(key: str) -> tuple[str, dict[str, dict[str, bool]], dict[str, list[FeatureRow]]]:
+    trajectory = load_trajectory(_SCAN["project"], key)
+    applied = {g.name: {i.id: i.applies(trajectory) for i in g.instances} for g in _SCAN["llm"]}
+    computed: dict[str, list[FeatureRow]] = {}
+    if _SCAN["dry_run"]:
+        return key, applied, computed
+    validators = _SCAN["validators"]
+    for group in _SCAN["code"]:
+        (instance,) = group.instances
+        if not instance.applies(trajectory):
+            computed[group.name] = _not_applicable(group, instance, key)
+            continue
+        values = instance.compute(trajectory)
+        computed[group.name] = [FeatureRow(key=key, group=group.name, feature=f.name,
+                                           value=validators[f.name](values[f.name])) for f in instance.features]
+    return key, applied, computed
+
+
+NOT_APPLICABLE = "not applicable"
+
+
 def _not_applicable(group: Group, instance: Instance, key: str) -> list[FeatureRow]:
-    return [FeatureRow(key=key, group=group.name, feature=f.name, value=None, detail="not applicable")
+    return [FeatureRow(key=key, group=group.name, feature=f.name, value=None, detail=NOT_APPLICABLE)
             for f in instance.features]
 
 
