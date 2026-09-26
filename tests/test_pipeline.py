@@ -18,6 +18,7 @@ from traj_analyzer.adapters.messages import MessagesAdapter
 from traj_analyzer.cli import main
 from traj_analyzer.extract import extract
 from traj_analyzer.features.spec import output_model, render_instruction
+from traj_analyzer.features.table import read_group
 from traj_analyzer.ingest import ingest, load_index, render_markdown
 from traj_analyzer.operators.base import FeatureSpec, Operator
 from traj_analyzer.operators.catalog import discover, load_groups
@@ -396,6 +397,87 @@ def test_status_counts_rows_by_status(project: Project, capsys: pytest.CaptureFi
     assert status["datasets"] == {"toucan": 30, "ultrachat": 40}
     assert status["groups"]["fixture-tool_share"] == {"operators": ["fixture.tool_share"], "extracted": 30,
                                                       "missing": 40, "ok": 30}
+
+
+def _with_shape(project: Project, study: dict[str, Any]) -> None:
+    assert main(["operators", "enable", "fixture.shape"]) == 0
+    (project.root / "studies" / "long.yaml").write_text(json.dumps(study), encoding="utf-8")
+    assert main(["extract", "--group", "stats-basic", "--group", "stats-tool_usage", "--group", "fixture-tool_share",
+                 "--group", "fixture-shape"]) == 0
+
+
+LONG = {"target": "total_chars >= 4000", "by": ["source"], "outcomes": ["total_chars"],
+        "pairs": {"within": "turn_band", "n": 3}, "rules": {"min_present": 10}}
+
+
+def test_study_screen_reports_verdicts(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
+    _with_shape(project, LONG)
+    capsys.readouterr()
+    assert main(["study", "screen", "long"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["population"] == 70
+    features = report["features"]
+    assert "total_chars" not in features and "source" not in features
+    # Only toucan has tool results, and every one of them succeeded.
+    assert features["tool_error_rate"]["verdict"] == "constant"
+    # 70 rows give ten or fewer durations, since only the Claude Code adapter records timestamps.
+    assert features["duration_minutes"]["verdict"] == "too_few"
+    # n_user_turns counts user turns, which turn_band puts in bands; the feature screened later is the redundant one.
+    assert features["n_user_turns"]["verdict"] != "redundant"
+    band = features["turn_band"]["columns"]["turn_band__one"]
+    assert band["redundant"] and band["most_similar"][0] in {"n_user_turns", "n_tool_calls", "n_steps"}
+    assert band["by"]["source"]["excess"] > 0.5
+    n_steps = features["n_steps"]["columns"]["n_steps"]
+    assert n_steps["r_success"] is not None and n_steps["r_success_within"] is not None
+
+    capsys.readouterr()
+    assert main(["study", "screen", "long", "--feature", "no_such_feature"]) == 2
+
+
+def test_study_pairs_share_the_within_feature(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
+    _with_shape(project, LONG)
+    capsys.readouterr()
+    assert main(["study", "pairs", "long"]) == 0
+    pairs = json.loads(capsys.readouterr().out)["pairs"]
+    assert len(pairs) == 3
+    frame = build_frame(project, load_groups(Project.load(project.root)), load_index(project), vector_length=4)
+    for pair in pairs:
+        succeeded, failed = pair["succeeded"]["key"], pair["failed"]["key"]
+        assert frame.query.at[succeeded, "turn_band"] == frame.query.at[failed, "turn_band"] == pair["turn_band"]
+        assert frame.query.at[succeeded, "total_chars"] >= 4000 > frame.query.at[failed, "total_chars"]
+        assert Path(pair["failed"]["markdown"]).is_file()
+
+    study = {**LONG, "pairs": {"within": "source", "distinct": "turn_band", "n": 5}}
+    (project.root / "studies" / "long.yaml").write_text(json.dumps(study), encoding="utf-8")
+    assert main(["study", "pairs", "long"]) == 0
+    distinct = json.loads(capsys.readouterr().out)["pairs"]
+    bands = [{frame.query.at[p[side]["key"], "turn_band"] for side in ["succeeded", "failed"]} for p in distinct]
+    # Both sources have trajectories of either outcome, and no band appears in two pairs.
+    assert len(distinct) == 2
+    assert not bands[0] & bands[1]
+
+
+def test_agreement_compares_reference_answers(project: Project, tmp_path: Path,
+                                              capsys: pytest.CaptureFixture[str]) -> None:
+    keys = _recorded_keys(project)
+    extract(project, groups=["outcome"], keys=keys, runner=ReplayWorkers(tmp_path / "replay"))
+    rows = {(r.key, r.feature): r for r in read_group(project, "outcome")}
+    reference = {key: {"task_type": rows[(key, "task_type")].value,
+                       "time_split": {"value": rows[(key, "time_split")].value, "steps": []}} for key in keys}
+    wrong = next(label for label in ["lookup", "creative", "other"] if label != reference[keys[0]]["task_type"])
+    reference[keys[0]]["task_type"] = wrong
+    path = tmp_path / "reference.json"
+    path.write_text(json.dumps(reference), encoding="utf-8")
+    capsys.readouterr()
+    assert main(["agreement", str(path)]) == 0
+    features = json.loads(capsys.readouterr().out)["features"]
+    assert features["task_type"]["compared"] == len(keys)
+    assert features["task_type"]["equal"] == len(keys) - 1
+    assert [m["key"] for m in features["task_type"]["mismatches"]] == [keys[0]]
+    assert features["time_split"]["agreement"] == 1.0
+
+    path.write_text(json.dumps({keys[0]: {"no_such_feature": True}}), encoding="utf-8")
+    assert main(["agreement", str(path)]) == 2
 
 
 def test_dry_run_writes_nothing(project: Project) -> None:

@@ -15,8 +15,10 @@ flowchart TD
     raw[Raw files] -->|adapter| unified[Unified Trajectory]
     unified -->|render and chunk| md["&lt;id&gt;.md with step numbers and chunk markers"]
     library[Built-in library and project operators/] -->|traj operators enable| config["operators list in traj.yaml"]
-    md -->|traj discover| propose[Claude Code reads samples, enables or writes operators]
+    study["studies/*.yaml: which trajectories succeed"] -->|traj study pairs| propose[Claude Code reads contrast pairs, writes candidate operators]
     propose --> config
+    table -->|traj study screen, traj agreement| verify[Candidates kept or dropped]
+    verify --> config
     config -->|traj extract| table[Feature table, one file per execution group]
     md -->|traj extract| table
     table -->|vectorize| frame[Wide table and distance matrix]
@@ -29,8 +31,8 @@ The work splits into two layers:
 
 | Layer | Responsibility | Form |
 |---|---|---|
-| `traj` CLI | ingest, render, chunk, manage operators, schedule extraction, store, vectorize, sample | Python package with deterministic steps |
-| Claude Code skills | discover features, write operators, read samples, write reports, feed findings back into operators and config | `.claude/skills/` of an analysis project |
+| `traj` CLI | ingest, render, chunk, manage operators, schedule extraction, store, vectorize, sample, pick contrast pairs, screen features, measure agreement | Python package with deterministic steps, a typer application |
+| Claude Code skills | propose and verify features, write operators, read samples, write reports, feed findings back into operators and config | `.claude/skills/` of an analysis project |
 
 ## 3. Analysis project
 
@@ -42,6 +44,7 @@ An analysis project is a git repository created by `traj init <dir>`:
 | `traj.yaml` | datasets, enabled operators, call groups, rendering, engine, extraction concurrency | yes |
 | `operators/**/*.py` | project operators, one per file | yes |
 | `samplers/<name>.yaml` | sampling strategies | yes |
+| `studies/<name>.yaml` | questions about which trajectories succeed, for proposing and verifying features | yes |
 | `adapters/*.py` | project adapters, one per file | yes |
 | `reports/*.md` | reports written by Claude Code | yes |
 | `.claude/skills/` | the skills `traj-features`, `traj-discover` and `traj-report` | yes |
@@ -346,18 +349,50 @@ A model behind an OpenAI-compatible endpoint is reached through a patch on the `
 The matching `engine` configuration is `provider: litellm`, `model: DeepSeek-V4-flash`, `env_passthrough: [LITELLM_API_KEY, LITELLM_BASE_URL]` and `patches: [engine/litellm.patch.yml]`.
 Endpoints and keys arrive through environment variables and are never written into project files.
 
-### 5.9 Feature discovery
+### 5.9 Proposing and verifying features
 
-`traj discover` is sampling with a single strategy: by default diversity sampling over the features of every code group, taking the trajectory nearest each cluster centre and reporting its rendered file and cluster size.
-`--group` chooses the groups to sample over, and `--method random` samples at random; both need those groups extracted first.
-The `traj-discover` skill guides Claude Code through these steps:
+Features are proposed and verified against a study.
+A study is a file `studies/<name>.yaml` holding one question about which trajectories succeed:
 
-1. Read the samples and note how the trajectories differ.
-2. Find operators that capture the differences with `traj operators list` and `traj operators show`, and enable them with `traj operators enable`.
-3. For differences the library does not cover, write new operators in the project's `operators/`, following the `traj-features` skill.
-4. Check the configuration with `traj validate`, and try the operators on a few trajectories with `traj extract --limit`.
+```yaml
+description: Among runs that named a true root-cause service, what separates those that also named its fault kind.
+where: "any_service_hit == 1"
+target: "any_root_cause_hit == 1"
+by: [model, case_id]
+outcomes: [eval, rc_services, gt_fault_kinds, submitted_fault_kinds]
+pairs: {within: case_id, spread: system, distinct: model, n: 5}
+```
 
-People review the git diff before committing.
+| Field | Meaning |
+|---|---|
+| `where` | condition selecting the study population, with `{feature.threshold}` expanded as in samplers |
+| `target` | expression that is true for the trajectories that succeed |
+| `by` | features whose influence the screen removes, such as the model and the task |
+| `outcomes` | feature names, operator instance ids or glob patterns of outcome features; they are never screened and never count as duplicates |
+| `pairs` | how contrast pairs are drawn: `within` the shared feature, `spread` the feature pairs take turns over, `distinct` the feature whose values appear in at most one pair, `n` the count |
+| `rules` | thresholds of the screen |
+
+`traj study pairs <name>` draws contrast pairs: groups of trajectories sharing the value of `within` come in a seeded random order, taking turns over the values of `spread`, and each group gives one trajectory that succeeded and one that did not.
+Reading the two runs of a pair side by side shows where the failed one parted from the successful one, and each such difference becomes a candidate feature.
+
+`traj study screen <name>` checks features on the study population, working on percentile ranks of their numeric columns; a category uses its one-hot columns:
+
+| Check | A column passes when |
+|---|---|
+| present | at least `min_present` trajectories have a value (default 100) |
+| constant | its most common value covers at most `max_mode_share` of them (default 0.95) |
+| redundant | its absolute rank correlation with every column of another feature stays below `max_similarity` (default 0.8); that feature is not screened or screened earlier, so of two duplicates only the later one is redundant |
+| varies by | the means of a `by` group explain at least `min_group_excess` more of its variance than random groups of the same count (default 0.05) |
+| explains success | after removing the mean of every `by` group from the column and from success, their correlation reaches `min_within_r` in absolute value (default 0.05) |
+
+Each feature gets the verdict of its best column: `explains_success`, `varies_by`, `uninformative`, `redundant`, `constant` or `too_few`.
+A feature with `varies_by` describes the groups, such as the style of a model, and says nothing about success within a group.
+
+`traj agreement <reference.json>` checks LLM features against answers from a careful reader.
+The reference maps trajectory keys to feature values; the command reports per feature the answers compared, how many match, the mean Jaccard similarity for sets, and every mismatch with the extractor's evidence.
+
+The `traj-discover` skill runs the loop: write a study, screen the existing features, read contrast pairs, propose atomic candidates, write them as operators, verify them with the screen and the agreement check, and commit what passes.
+Without a notion of success, `traj discover` offers diverse reading instead: it samples with one strategy, by default diversity over the features of every code group, and lists the rendered files.
 Project operators useful across projects can move into the built-in library.
 
 ## 6. Sampling
@@ -442,14 +477,19 @@ The `traj-report` skill guides Claude Code through these steps:
 | `traj operators show <name>` | show an operator's parameters, defaults, outputs, guidance and file |
 | `traj operators enable <name> [--as a] [--prefix p] [--call c] [--param k=v...]` | enable an operator in `traj.yaml`, keeping the file's comments and layout |
 | `traj operators disable <name>` | remove the entries whose operator or instance name is `<name>` from `traj.yaml` |
-| `traj validate [--instructions]` | check the configuration, every group and every sampler, and print the generated output schemas |
-| `traj discover [--n 20] [--method diversity\|random] [--group g...]` | pick trajectories for feature discovery |
+| `traj validate [--instructions]` | check the configuration, every group, sampler and study, and print the generated output schemas |
+| `traj discover [--n 20] [--method diversity\|random] [--group g...]` | pick a diverse sample to read |
+| `traj study list` | list the studies |
+| `traj study pairs <name> [--n k] [--seed s]` | draw contrast pairs for a study |
+| `traj study screen <name> [--feature f...]` | screen features on a study population |
+| `traj agreement <reference.json>` | compare reference answers with extracted features |
 | `traj extract [--group g] [--dataset d] [--key k] [--limit n] [--workers n] [--dry-run]` | extract features |
-| `traj table [--format json\|csv\|describe] [--columns c...]` | print the wide table |
+| `traj table [--format json\|csv\|describe] [--column c...]` | print the wide table |
 | `traj sample [--sampler default] [--budget n]` | sample |
 | `traj show <key> [--cat]` | print a trajectory's rendered file and features, or its rendered content |
 | `traj status` | print dataset sizes and extraction coverage per group |
 
+Options that take several values repeat, such as `--group a --group b`.
 `operators enable` and `operators disable` validate the whole modified configuration before writing `traj.yaml`.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 
@@ -462,6 +502,7 @@ The pipeline of ingestion, rendering, extraction, caching, vectorization and sam
 | a data source | an adapter file `<name>.py` | the project's `adapters/`; general ones in `traj_analyzer/adapters/` of the package | defines the class `ADAPTER`, constructed from `datasets.<name>.options`; `read(path, dataset)` returns trajectories |
 | features | an operator file `<namespace>/<name>.py` | the project's `operators/`; general ones in `traj_analyzer/operators/library/` of the package | defines `OPERATOR`; `outputs` returns `FeatureSpec` of the six feature types |
 | a sampling scheme | a sampler file `<name>.yaml` | the project's `samplers/` | `SamplerSpec` |
+| a question for feature work | a study file `<name>.yaml` | the project's `studies/` | `StudySpec` |
 
 Adapters and operators meet only through the Trajectory.
 When project operators depend on conventions of an adapter, such as metadata keys or the `name` of special steps, those conventions are constants in the adapter file and appear in the dataset description.

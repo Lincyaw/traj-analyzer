@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-import argparse
 import json
 import shutil
 import sys
 from collections import Counter
 from dataclasses import asdict
+from enum import StrEnum
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
+import typer
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
 from traj_analyzer.adapters import discover_adapters
+from traj_analyzer.agreement import agreement
 from traj_analyzer.extract import extract
 from traj_analyzer.features.spec import output_model, render_instruction
 from traj_analyzer.features.table import read_group
@@ -22,6 +24,7 @@ from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.operators.catalog import discover, load_groups
 from traj_analyzer.project import CONFIG_FILE, Config, ConfigError, Project
 from traj_analyzer.sampling import SamplerSpec, StrategySpec, enrich, load_sampler, sample, save
+from traj_analyzer.studies import contrast_pairs, list_studies, load_study, outcome_features, population, screen
 from traj_analyzer.vectorize import Frame, build_frame
 
 DESCRIPTION = """\
@@ -33,15 +36,45 @@ Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 # Packaging drops files whose names start with a dot, so templates store these without it.
 _DOTTED = {"gitignore": ".gitignore", "claude": ".claude"}
 
+app = typer.Typer(help=DESCRIPTION, no_args_is_help=True, add_completion=False, pretty_exceptions_enable=False)
+adapters_app = typer.Typer(help="Data sources.", no_args_is_help=True)
+operators_app = typer.Typer(help="Browse, enable and disable operators.", no_args_is_help=True)
+study_app = typer.Typer(help="Questions about which trajectories succeed and which features tell why.",
+                        no_args_is_help=True)
+app.add_typer(adapters_app, name="adapters")
+app.add_typer(operators_app, name="operators")
+app.add_typer(study_app, name="study")
+
+Datasets = Annotated[list[str] | None, typer.Option("--dataset", help="Restrict to this dataset; repeatable.")]
+
+
+class OperatorKind(StrEnum):
+    code = "code"
+    llm = "llm"
+
+
+class DiscoverMethod(StrEnum):
+    diversity = "diversity"
+    random = "random"
+
+
+class TableFormat(StrEnum):
+    json = "json"
+    csv = "csv"
+    describe = "describe"
+
 
 def _emit(data: Any) -> None:
     json.dump(data, sys.stdout, ensure_ascii=False, indent=1)
     sys.stdout.write("\n")
 
 
-def cmd_init(args: argparse.Namespace) -> None:
-    target = Path(args.dir).expanduser().resolve()
-    if (target / CONFIG_FILE).exists() and not args.force:
+@app.command("init")
+def cmd_init(directory: Annotated[str, typer.Argument(help="Directory of the new project.")],
+             force: Annotated[bool, typer.Option(help="Overwrite an existing traj.yaml.")] = False) -> None:
+    """Create an analysis project skeleton."""
+    target = Path(directory).expanduser().resolve()
+    if (target / CONFIG_FILE).exists() and not force:
         raise ConfigError(f"{target / CONFIG_FILE} already exists; use --force to overwrite")
     written = []
     with as_file(files("traj_analyzer") / "templates" / "project") as root:
@@ -56,27 +89,40 @@ def cmd_init(args: argparse.Namespace) -> None:
     _emit({"project": str(target), "files": written})
 
 
-def cmd_ingest(args: argparse.Namespace) -> None:
-    _emit({"ingested": ingest(Project.find(), args.datasets or None)})
+@app.command("ingest")
+def cmd_ingest(datasets: Annotated[list[str] | None, typer.Argument(help="Datasets; default all.")] = None) -> None:
+    """Read raw data into the unified form."""
+    _emit({"ingested": ingest(Project.find(), datasets or None)})
 
 
-def cmd_validate(args: argparse.Namespace) -> None:
+@app.command("validate")
+def cmd_validate(instructions: Annotated[bool, typer.Option(help="Include rendered instructions.")] = False) -> None:
+    """Check traj.yaml, enabled operators, samplers and studies."""
     project = Project.find()
+    groups = load_groups(project)
     report: dict[str, Any] = {"datasets": list(project.config.datasets), "groups": []}
-    for group in load_groups(project):
+    for group in groups:
         entry: dict[str, Any] = {
             "group": group.name, "kind": group.kind, "operators": [i.id for i in group.instances],
             "features": [f.name for f in group.features],
         }
         if not group.is_code:
             entry["output_schema"] = output_model(group).model_json_schema()
-            if args.instructions:
+            if instructions:
                 entry["instruction"] = render_instruction(group)
         report["groups"].append(entry)
     samplers = sorted(p.stem for p in project.samplers_dir.glob("*.yaml"))
     for name in samplers:
         load_sampler(project, name)
     report["samplers"] = samplers
+    features = {f.name for g in groups for f in g.features}
+    for name in list_studies(project):
+        study = load_study(project, name)
+        named = [*study.by, *([study.pairs.within] if study.pairs else [])]
+        unknown = sorted(set(named) - features)
+        if unknown:
+            raise ConfigError(f"Study {name} names features that are not enabled: {unknown}")
+    report["studies"] = list_studies(project)
     _emit(report)
 
 
@@ -87,7 +133,9 @@ def _enabled(project: Project) -> dict[str, list[str]]:
     return enabled
 
 
-def cmd_adapters_list(args: argparse.Namespace) -> None:
+@adapters_app.command("list")
+def cmd_adapters_list() -> None:
+    """Adapters of the package and the project, and the datasets using them."""
     project = Project.find()
     used = {name: config.adapter for name, config in project.config.datasets.items()}
     _emit({"adapters": [
@@ -98,15 +146,18 @@ def cmd_adapters_list(args: argparse.Namespace) -> None:
     ]})
 
 
-def cmd_operators_list(args: argparse.Namespace) -> None:
+@operators_app.command("list")
+def cmd_operators_list(tag: Annotated[str | None, typer.Option(help="Only operators with this tag.")] = None,
+                       kind: Annotated[OperatorKind | None, typer.Option(help="Only this kind.")] = None) -> None:
+    """Operators in the built-in library and the project."""
     project = Project.find()
     enabled = _enabled(project)
     rows = []
     for name, ref in discover(project).items():
         operator = ref.operator
-        if args.tag and args.tag not in operator.tags:
+        if tag and tag not in operator.tags:
             continue
-        if args.kind and args.kind != operator.kind:
+        if kind and kind.value != operator.kind:
             continue
         rows.append({
             "name": name, "kind": operator.kind, "origin": ref.origin, "tags": list(operator.tags),
@@ -117,12 +168,14 @@ def cmd_operators_list(args: argparse.Namespace) -> None:
     _emit({"operators": rows})
 
 
-def cmd_operators_show(args: argparse.Namespace) -> None:
+@operators_app.command("show")
+def cmd_operators_show(name: str) -> None:
+    """One operator's parameters, outputs and guidance."""
     project = Project.find()
     refs = discover(project)
-    if args.name not in refs:
-        raise ConfigError(f"Unknown operator {args.name}")
-    ref = refs[args.name]
+    if name not in refs:
+        raise ConfigError(f"Unknown operator {name}")
+    ref = refs[name]
     operator = ref.operator
     params = operator.params()
     _emit({
@@ -154,14 +207,22 @@ def _edit_operators(project: Project, change: Any) -> list[dict[str, Any]]:
     return [use.model_dump(by_alias=True, exclude_none=True) for use in config.operators]
 
 
-def cmd_operators_enable(args: argparse.Namespace) -> None:
+@operators_app.command("enable")
+def cmd_operators_enable(
+    name: str,
+    alias: Annotated[str | None, typer.Option("--as", help="Instance name for enabling one operator twice.")] = None,
+    prefix: Annotated[str | None, typer.Option(help="Prepended as <prefix>_ to every feature name.")] = None,
+    call: Annotated[str | None, typer.Option(help="Call group for LLM operators.")] = None,
+    param: Annotated[list[str] | None, typer.Option(help="key=value, value parsed as YAML; repeatable.")] = None,
+) -> None:
+    """Add an operator to traj.yaml, keeping the file's comments and layout."""
     project = Project.find()
-    entry: dict[str, Any] = {"use": args.name}
-    for option, value in (("as", args.alias), ("prefix", args.prefix), ("call", args.call)):
+    entry: dict[str, Any] = {"use": name}
+    for option, value in (("as", alias), ("prefix", prefix), ("call", call)):
         if value:
             entry[option] = value
     params = {}
-    for item in args.param or []:
+    for item in param or []:
         key, sep, value = item.partition("=")
         if not sep:
             raise ConfigError(f"--param must be key=value: {item}")
@@ -171,13 +232,15 @@ def cmd_operators_enable(args: argparse.Namespace) -> None:
     _emit({"operators": _edit_operators(project, lambda ops: ops.append(entry))})
 
 
-def cmd_operators_disable(args: argparse.Namespace) -> None:
+@operators_app.command("disable")
+def cmd_operators_disable(name: str) -> None:
+    """Remove the operators with this name or instance name from traj.yaml."""
     project = Project.find()
 
     def remove(ops: list[Any]) -> None:
-        keep = [op for op in ops if args.name not in (op["use"], op.get("as"))]
+        keep = [op for op in ops if name not in (op["use"], op.get("as"))]
         if len(keep) == len(ops):
-            raise ConfigError(f"No enabled operator is named {args.name}")
+            raise ConfigError(f"No enabled operator is named {name}")
         ops[:] = keep
 
     _emit({"operators": _edit_operators(project, remove)})
@@ -188,18 +251,26 @@ def _frame(project: Project, datasets: list[str] | None, groups: list[str] | Non
                        project.config.sampling.vector_length)
 
 
-def cmd_discover(args: argparse.Namespace) -> None:
-    """Sample with one strategy over the features of code groups, which are cheap to extract for everything."""
+@app.command("discover")
+def cmd_discover(
+    n: Annotated[int, typer.Option(help="Trajectories to pick.")] = 20,
+    seed: int = 0,
+    dataset: Datasets = None,
+    method: Annotated[DiscoverMethod, typer.Option(help="How to pick.")] = DiscoverMethod.diversity,
+    group: Annotated[list[str] | None, typer.Option(help="Groups whose features drive diversity; default all code "
+                                                         "groups; repeatable.")] = None,
+) -> None:
+    """Pick trajectories to read when proposing features, sampling over the features of code groups."""
     project = Project.find()
-    groups = args.group or [g.name for g in load_groups(project) if g.is_code]
-    frame = _frame(project, args.dataset, groups)
+    groups = group or [g.name for g in load_groups(project) if g.is_code]
+    frame = _frame(project, dataset, groups)
     if not frame.columns:
         raise ConfigError(f"Groups {groups} have no extracted values; run `traj extract` for them first")
-    spec = SamplerSpec(name="discover", budget=args.n, seed=args.seed, datasets=args.dataset,
-                       strategies=[StrategySpec(kind=args.method, quota="rest")])
+    spec = SamplerSpec(name="discover", budget=n, seed=seed, datasets=dataset,
+                       strategies=[StrategySpec(kind=method.value, quota="rest")])
     result = sample(spec, frame, load_groups(project, groups))
-    rows = {row.key: row for row in load_index(project, args.dataset)}
-    _emit({"method": args.method, "population": result.population, "trajectories": [
+    rows = {row.key: row for row in load_index(project, dataset)}
+    _emit({"method": method.value, "population": result.population, "trajectories": [
         {"key": pick.key, "markdown": str(project.trajectory_path(pick.key, ".md")),
          "n_steps": rows[pick.key].n_steps, "chars": rows[pick.key].chars, "reason": pick.reason,
          "metadata": rows[pick.key].metadata}
@@ -207,34 +278,50 @@ def cmd_discover(args: argparse.Namespace) -> None:
     ]})
 
 
-def cmd_extract(args: argparse.Namespace) -> None:
-    reports = extract(
-        Project.find(), groups=args.group, datasets=args.dataset, keys=args.key,
-        limit=args.limit, workers=args.workers, dry_run=args.dry_run,
-    )
-    _emit({"dry_run": args.dry_run, "groups": [asdict(r) for r in reports]})
+@app.command("extract")
+def cmd_extract(
+    group: Annotated[list[str] | None, typer.Option(help="Execution group; repeatable.")] = None,
+    dataset: Datasets = None,
+    key: Annotated[list[str] | None, typer.Option(help="Trajectory key; repeatable.")] = None,
+    limit: Annotated[int | None, typer.Option(help="At most this many trajectories.")] = None,
+    workers: Annotated[int | None, typer.Option(help="Worker processes for LLM groups.")] = None,
+    dry_run: Annotated[bool, typer.Option(help="Only look up the cache.")] = False,
+) -> None:
+    """Compute features."""
+    reports = extract(Project.find(), groups=group, datasets=dataset, keys=key, limit=limit, workers=workers,
+                      dry_run=dry_run)
+    _emit({"dry_run": dry_run, "groups": [asdict(r) for r in reports]})
 
 
-def cmd_table(args: argparse.Namespace) -> None:
-    table = _frame(Project.find(), args.dataset).query
-    if args.columns:
-        missing = sorted(set(args.columns) - set(table.columns))
+@app.command("table")
+def cmd_table(
+    dataset: Datasets = None,
+    column: Annotated[list[str] | None, typer.Option(help="Column to print; repeatable.")] = None,
+    format: Annotated[TableFormat, typer.Option(help="Output format.")] = TableFormat.json,
+) -> None:
+    """Print the wide feature table."""
+    table = _frame(Project.find(), dataset).query
+    if column:
+        missing = sorted(set(column) - set(table.columns))
         if missing:
             raise ConfigError(f"Unknown columns: {missing}")
-        table = table[args.columns]
-    if args.format == "csv":
+        table = table[column]
+    if format is TableFormat.csv:
         table.to_csv(sys.stdout)
-    elif args.format == "describe":
+    elif format is TableFormat.describe:
         _emit(json.loads(table.describe(include="all").to_json()))
     else:
         _emit(json.loads(table.reset_index().to_json(orient="records", force_ascii=False)))
 
 
-def cmd_sample(args: argparse.Namespace) -> None:
+@app.command("sample")
+def cmd_sample(sampler: Annotated[str, typer.Option(help="Sampler name under samplers/.")] = "default",
+               budget: Annotated[int | None, typer.Option(help="Override the sampler budget.")] = None) -> None:
+    """Select trajectories for review."""
     project = Project.find()
-    spec = load_sampler(project, args.sampler)
-    if args.budget:
-        spec = spec.model_copy(update={"budget": args.budget})
+    spec = load_sampler(project, sampler)
+    if budget:
+        spec = spec.model_copy(update={"budget": budget})
     frame = _frame(project, spec.datasets)
     result = sample(spec, frame, load_groups(project))
     selection = {
@@ -246,24 +333,27 @@ def cmd_sample(args: argparse.Namespace) -> None:
     _emit({"selection": str(path), **selection})
 
 
-def cmd_show(args: argparse.Namespace) -> None:
+@app.command("show")
+def cmd_show(key: str, cat: Annotated[bool, typer.Option(help="Print the rendered Markdown.")] = False) -> None:
+    """One trajectory's rendered file and features."""
     project = Project.find()
-    path = project.trajectory_path(args.key, ".md")
+    path = project.trajectory_path(key, ".md")
     if not path.is_file():
-        raise ConfigError(f"No trajectory {args.key}")
-    if args.cat:
+        raise ConfigError(f"No trajectory {key}")
+    if cat:
         sys.stdout.write(path.read_text(encoding="utf-8"))
         return
     features = {}
     for group in load_groups(project):
         for row in read_group(project, group.name):
-            if row.key == args.key:
+            if row.key == key:
                 features[row.feature] = row.model_dump(exclude={"key", "feature"})
-    _emit({"key": args.key, "markdown": str(path), "features": features})
+    _emit({"key": key, "markdown": str(path), "features": features})
 
 
-def cmd_status(args: argparse.Namespace) -> None:
-    """Trajectories per dataset, and per group how many trajectories have rows in the feature table, by status.
+@app.command("status")
+def cmd_status() -> None:
+    """Trajectories per dataset, and per group how many have rows in the feature table, by status.
 
     The table holds what the last `traj extract` wrote; after changing data or operators, run it again.
     """
@@ -282,91 +372,78 @@ def cmd_status(args: argparse.Namespace) -> None:
            "groups": groups})
 
 
-def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="traj", description=DESCRIPTION,
-                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = root.add_subparsers(dest="command", required=True)
+@study_app.command("list")
+def cmd_study_list() -> None:
+    """Studies under studies/."""
+    project = Project.find()
+    _emit({"studies": [load_study(project, name).model_dump() for name in list_studies(project)]})
 
-    p = sub.add_parser("init", help="create an analysis project skeleton")
-    p.add_argument("dir")
-    p.add_argument("--force", action="store_true")
-    p.set_defaults(fn=cmd_init)
 
-    p = sub.add_parser("ingest", help="read raw data into the unified form")
-    p.add_argument("datasets", nargs="*")
-    p.set_defaults(fn=cmd_ingest)
+@study_app.command("pairs")
+def cmd_study_pairs(name: str, n: Annotated[int | None, typer.Option(help="Override pairs.n.")] = None,
+                    seed: int = 0) -> None:
+    """Contrast pairs: trajectories sharing the `within` feature, one that succeeded and one that did not."""
+    project = Project.find()
+    study = load_study(project, name)
+    if study.pairs is None:
+        raise ConfigError(f"Study {name} has no pairs section")
+    spec = study.pairs.model_copy(update={"n": n}) if n else study.pairs
+    groups = load_groups(project)
+    data = population(study, _frame(project, study.datasets), groups)
+    pairs = contrast_pairs(spec, data, seed)
+    for pair in pairs:
+        for side in ["succeeded", "failed"]:
+            pair[side] = {"key": pair[side], "markdown": str(project.trajectory_path(pair[side], ".md"))}
+    _emit({"study": name, "population": len(data.success), "success_rate": _rate(data.success), "pairs": pairs})
 
-    p = sub.add_parser("validate", help="check traj.yaml, enabled operators and samplers")
-    p.add_argument("--instructions", action="store_true", help="include rendered instructions")
-    p.set_defaults(fn=cmd_validate)
 
-    p = sub.add_parser("adapters", help="data sources")
-    ads = p.add_subparsers(dest="adapters_command", required=True)
-    q = ads.add_parser("list", help="adapters of the package and the project")
-    q.set_defaults(fn=cmd_adapters_list)
+def _rate(success: Any) -> float | None:
+    return None if success.notna().sum() == 0 else round(float(success.dropna().astype(float).mean()), 3)
 
-    p = sub.add_parser("operators", help="browse, enable and disable operators")
-    ops = p.add_subparsers(dest="operators_command", required=True)
-    q = ops.add_parser("list", help="operators in the built-in library and the project")
-    q.add_argument("--tag")
-    q.add_argument("--kind", choices=["code", "llm"])
-    q.set_defaults(fn=cmd_operators_list)
-    q = ops.add_parser("show", help="one operator's params, outputs and guidance")
-    q.add_argument("name")
-    q.set_defaults(fn=cmd_operators_show)
-    q = ops.add_parser("enable", help="add an operator to traj.yaml")
-    q.add_argument("name")
-    q.add_argument("--as", dest="alias", help="instance name, needed to enable one operator twice")
-    q.add_argument("--prefix", help="prepended as <prefix>_ to every feature name")
-    q.add_argument("--call", help="call group for llm operators")
-    q.add_argument("--param", action="append", help="key=value, value parsed as YAML")
-    q.set_defaults(fn=cmd_operators_enable)
-    q = ops.add_parser("disable", help="remove operators with this name or alias from traj.yaml")
-    q.add_argument("name")
-    q.set_defaults(fn=cmd_operators_disable)
 
-    p = sub.add_parser("discover", help="pick trajectories to read when proposing features")
-    p.add_argument("--n", type=int, default=20)
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--dataset", action="append")
-    p.add_argument("--method", choices=["diversity", "random"], default="diversity")
-    p.add_argument("--group", action="append", help="groups whose features drive diversity; default all code groups")
-    p.set_defaults(fn=cmd_discover)
+@study_app.command("screen")
+def cmd_study_screen(
+    name: str,
+    feature: Annotated[list[str] | None, typer.Option(help="Feature to screen; default every enabled feature "
+                                                           "except outcomes and by; repeatable.")] = None,
+) -> None:
+    """Check features on the study population: constant, redundant, varying by a `by` feature, or explaining
+    success once the `by` features are held fixed."""
+    project = Project.find()
+    study = load_study(project, name)
+    groups = load_groups(project)
+    data = population(study, _frame(project, study.datasets), groups)
+    outcomes = outcome_features(study, groups)
+    features = feature or [f for f in data.frame.columns if f not in outcomes and f not in study.by]
+    report = screen(study, data, features, outcomes)
+    verdicts: dict[str, list[str]] = {}
+    for feature_name, entry in report.items():
+        verdicts.setdefault(entry["verdict"], []).append(feature_name)
+    _emit({"study": name, "population": len(data.success), "success_rate": _rate(data.success),
+           "rules": study.rules.model_dump(), "verdicts": verdicts, "features": report})
 
-    p = sub.add_parser("extract", help="compute features")
-    p.add_argument("--group", action="append")
-    p.add_argument("--dataset", action="append")
-    p.add_argument("--key", action="append")
-    p.add_argument("--limit", type=int)
-    p.add_argument("--workers", type=int)
-    p.add_argument("--dry-run", action="store_true")
-    p.set_defaults(fn=cmd_extract)
 
-    p = sub.add_parser("table", help="print the wide feature table")
-    p.add_argument("--dataset", action="append")
-    p.add_argument("--columns", nargs="*")
-    p.add_argument("--format", choices=["json", "csv", "describe"], default="json")
-    p.set_defaults(fn=cmd_table)
-
-    p = sub.add_parser("sample", help="select trajectories for review")
-    p.add_argument("--sampler", default="default")
-    p.add_argument("--budget", type=int)
-    p.set_defaults(fn=cmd_sample)
-
-    p = sub.add_parser("show", help="one trajectory's file and features")
-    p.add_argument("key")
-    p.add_argument("--cat", action="store_true", help="print the rendered Markdown")
-    p.set_defaults(fn=cmd_show)
-
-    p = sub.add_parser("status", help="dataset sizes and extraction coverage")
-    p.set_defaults(fn=cmd_status)
-    return root
+@app.command("agreement")
+def cmd_agreement(reference: Annotated[str, typer.Argument(
+        help="JSON {key: {feature: value}} written by a careful reader.")]) -> None:
+    """Compare reference answers with the extracted features."""
+    project = Project.find()
+    answers = json.loads(Path(reference).read_text(encoding="utf-8"))
+    specs = {}
+    rows = {}
+    for group in load_groups(project):
+        specs.update({f.name: f for f in group.features})
+        for row in read_group(project, group.name):
+            if row.key in answers:
+                rows[(row.key, row.feature)] = row
+    _emit({"reference": reference, "features": agreement(answers, specs, rows)})
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
     try:
-        args.fn(args)
+        app(args=argv, prog_name="traj")
+    except SystemExit as exit:
+        return exit.code if isinstance(exit.code, int) else 0
     except (ConfigError, ValidationError) as error:
         print(json.dumps({"error": str(error)}, ensure_ascii=False), file=sys.stderr)
         return 2

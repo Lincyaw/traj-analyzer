@@ -3,11 +3,11 @@ budget: 30
 seed: 0
 features: all          # or a list of feature names, or {feature: weight}
 strategies:
-  # Uncomment once the outcome group is extracted.
+  # Uncomment once the dialogue group is extracted.
   # - kind: target
-  #   label: frustrated
+  #   label: corrected
   #   quota: 0.3
-  #   where: "user_frustration >= {user_frustration.high}"
+  #   where: "user_corrects == 1"
   #   within: diversity
   - kind: outlier
     label: outlier

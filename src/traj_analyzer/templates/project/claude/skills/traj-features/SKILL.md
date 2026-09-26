@@ -37,7 +37,7 @@ Questions that must not be features, because they need judgement across the whol
 
 Build such a judgement from atomic features instead, in a sampler condition or in a report.
 For example, "anchored" is `first_suspect` equal to the submitted service, with a single entry in `suspected_services`.
-"Dismissed a true root cause as a victim" is a non-empty `ruled_out_gt_services`.
+"Dismissed a true root cause as a victim" is a service found both in `ruled_out_services` and in the ground truth.
 
 Name a feature with a noun, such as `tool_calls` or `suspected_services`, or with a noun and a verb, such as `user_corrects` or `agent_notes_missing_data`.
 A name never starts with a verb.
@@ -137,5 +137,6 @@ Hide metadata an LLM must not see, such as evaluation results, with `render.hide
    Open the Markdown with `traj show <key> --cat` and check every value against the cited step.
 4. When a value is wrong, first ask whether the question is atomic.
    A feature that is often wrong usually needs to be split into simpler features; rewording the same hard question rarely helps.
+   `traj agreement <reference.json>` measures this on many trajectories at once against answers from a careful reader; the `traj-discover` skill describes it.
 5. `traj extract --dry-run` reports how many LLM calls a full run needs; answers already in the mailbox are reused.
 6. `traj extract` runs everything; `traj status` shows how many trajectories each group has rows for, by status.

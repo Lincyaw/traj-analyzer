@@ -27,12 +27,15 @@ traj extract --group stats-basic --group stats-tool_usage
 traj discover --n 20
 traj validate
 traj extract --group dialogue --limit 5
+traj study screen corrections
+traj study pairs corrections
 traj sample
 ```
 
 The `traj.yaml` created by `traj init` enables every general operator of the built-in library, and the seven LLM operators share the `dialogue` call group.
 New data sources and new features are added as files: adapters in the project's `adapters/`, operators in the project's `operators/`, as the "Extension points" section of the design describes.
-The project also carries three skills: `traj-features` explains how features are defined and extracted, `traj-discover` reads samples and enables or writes operators, and `traj-report` writes reports.
+A study in `studies/` states which trajectories succeed; `traj study pairs` draws contrast pairs to read, and `traj study screen` checks whether each feature is constant, redundant, differs between groups such as models, or explains success.
+The project also carries three skills: `traj-features` explains how features are defined and extracted, `traj-discover` proposes features from contrast pairs and verifies them, and `traj-report` writes reports.
 
 Every command prints JSON to stdout.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
