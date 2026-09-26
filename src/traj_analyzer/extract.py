@@ -129,9 +129,9 @@ def _scan(
     for key, applied, computed in _scan_results(project, code, llm, rows, dry_run):
         for name, flags in applied.items():
             applies[name][key] = flags
-        for name, feature_rows in computed.items():
-            reports[name].ok += feature_rows[0].detail != NOT_APPLICABLE
-            reports[name].not_applicable += feature_rows[0].detail == NOT_APPLICABLE
+        for name, (applied_here, feature_rows) in computed.items():
+            reports[name].ok += applied_here
+            reports[name].not_applicable += not applied_here
             out[name] += feature_rows
     for group in code:
         if dry_run:
@@ -143,8 +143,8 @@ def _scan(
 
 def _scan_results(
     project: Project, code: list[Group], llm: list[Group], rows: list[IndexRow], dry_run: bool
-) -> Iterator[tuple[str, dict[str, dict[str, bool]], dict[str, list[FeatureRow]]]]:
-    """Per trajectory, in order: which LLM operators apply, and the rows of every code group.
+) -> Iterator[tuple[str, dict[str, dict[str, bool]], dict[str, tuple[bool, list[FeatureRow]]]]]:
+    """Per trajectory, in order: which LLM operators apply, and whether every code group applies, with its rows.
 
     Trajectories are loaded in `extract.code_workers` processes, each of which loads the project from disk.
     """
@@ -179,29 +179,27 @@ def _start_scan(root: str, code: list[str], llm: list[str], dry_run: bool) -> No
                  validators={f.name: value_validator(f) for n in code for f in groups[n].features})
 
 
-def _scan_one(key: str) -> tuple[str, dict[str, dict[str, bool]], dict[str, list[FeatureRow]]]:
+def _scan_one(key: str) -> tuple[str, dict[str, dict[str, bool]], dict[str, tuple[bool, list[FeatureRow]]]]:
     trajectory = load_trajectory(_SCAN["project"], key)
     applied = {g.name: {i.id: i.applies(trajectory) for i in g.instances} for g in _SCAN["llm"]}
-    computed: dict[str, list[FeatureRow]] = {}
+    computed: dict[str, tuple[bool, list[FeatureRow]]] = {}
     if _SCAN["dry_run"]:
         return key, applied, computed
     validators = _SCAN["validators"]
     for group in _SCAN["code"]:
         (instance,) = group.instances
         if not instance.applies(trajectory):
-            computed[group.name] = _not_applicable(group, instance, key)
+            computed[group.name] = (False, _not_applicable(group, instance, key))
             continue
         values = instance.compute(trajectory)
-        computed[group.name] = [FeatureRow(key=key, group=group.name, feature=f.name,
-                                           value=validators[f.name](values[f.name])) for f in instance.features]
+        computed[group.name] = (True, [FeatureRow(key=key, group=group.name, feature=f.name,
+                                                  value=validators[f.name](values[f.name]))
+                                       for f in instance.features])
     return key, applied, computed
 
 
-NOT_APPLICABLE = "not applicable"
-
-
 def _not_applicable(group: Group, instance: Instance, key: str) -> list[FeatureRow]:
-    return [FeatureRow(key=key, group=group.name, feature=f.name, value=None, detail=NOT_APPLICABLE)
+    return [FeatureRow(key=key, group=group.name, feature=f.name, value=None, detail="not applicable")
             for f in instance.features]
 
 

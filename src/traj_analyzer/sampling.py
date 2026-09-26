@@ -83,7 +83,7 @@ def sample(spec: SamplerSpec, frame: Frame, groups: list[Group]) -> Sampling:
     rng = np.random.default_rng(spec.seed)
     keys = list(frame.query.index)
     x = frame.matrix(weights)
-    thresholds = {f.name: f.thresholds for g in groups for f in g.features}
+    thresholds = feature_thresholds(groups)
     picks: list[Pick] = []
     reports: list[StrategyReport] = []
     chosen: set[str] = set()
@@ -201,12 +201,29 @@ def expand_where(where: str, thresholds: dict[str, dict[str, float]]) -> str:
     return _THRESHOLD.sub(replace, where)
 
 
+def feature_thresholds(groups: list[Group]) -> dict[str, dict[str, float]]:
+    return {f.name: f.thresholds for g in groups for f in g.features}
+
+
+def select(query: pd.DataFrame, where: str, thresholds: dict[str, dict[str, float]]) -> pd.DataFrame:
+    """The rows matching a `where` condition, with `{feature.threshold}` expanded."""
+    return query.query(expand_where(where, thresholds), engine="python")
+
+
+def evaluate(query: pd.DataFrame, expression: str, thresholds: dict[str, dict[str, float]]) -> pd.Series:
+    """One value per row of an expression over query columns, with `{feature.threshold}` expanded."""
+    values = query.eval(expand_where(expression, thresholds), engine="python")
+    if not isinstance(values, pd.Series):
+        raise ConfigError(f"Expression {expression!r} does not give one value per trajectory")
+    return values
+
+
 def _matches(
     strategy: StrategySpec, label: str, query: pd.DataFrame, thresholds: dict[str, dict[str, float]]
 ) -> set[str]:
     if not strategy.where:
         raise ConfigError(f"{label}: a target strategy needs where")
-    return set(query.query(expand_where(strategy.where, thresholds), engine="python").index)
+    return set(select(query, strategy.where, thresholds).index)
 
 
 def _target(

@@ -18,16 +18,24 @@ MAX_FREE_LABELS = 100
 
 @dataclass
 class Frame:
-    """Two views of the feature table, both indexed by trajectory key.
+    """Three views of the feature table, all indexed by trajectory key.
 
-    `query` holds readable columns for filtering, and `distance` holds numeric columns for clustering.
-    `columns` maps each feature to its columns in `distance`, and `extracted` to the keys it was extracted for.
+    `query` holds readable columns for filtering, `distance` numeric columns for clustering, and `numeric` the
+    columns statistics work on: the query columns, with one-hot columns in place of each category.
+    `columns` and `numeric_columns` map each feature to its columns in `distance` and `numeric`, and `extracted`
+    to the keys it was extracted for.
     """
 
     query: pd.DataFrame
     distance: pd.DataFrame
+    numeric: pd.DataFrame
     columns: dict[str, list[str]] = field(default_factory=dict)
+    numeric_columns: dict[str, list[str]] = field(default_factory=dict)
     extracted: dict[str, set[str]] = field(default_factory=dict)
+
+    def rows(self, index: pd.Index) -> Frame:
+        return Frame(query=self.query.loc[index], distance=self.distance.loc[index], numeric=self.numeric.loc[index],
+                     columns=self.columns, numeric_columns=self.numeric_columns, extracted=self.extracted)
 
     def complete(self, features: list[str]) -> Frame:
         """Keep the trajectories that have a row for every one of `features` in the feature table.
@@ -41,8 +49,7 @@ class Frame:
         mask = pd.Series(True, index=self.distance.index)
         for feature in features:
             mask &= self.distance.index.isin(list(self.extracted[feature]))
-        return Frame(query=self.query[mask], distance=self.distance[mask], columns=self.columns,
-                     extracted=self.extracted)
+        return self.rows(self.distance.index[mask])
 
     def matrix(self, weights: dict[str, float]) -> np.ndarray:
         """Standardize every column, fill missing values with the column mean, and apply weights.
@@ -79,7 +86,9 @@ def build_frame(
     """Read the feature table as the last `traj extract` left it, for the given trajectories and enabled features."""
     query: dict[str, pd.Series] = {}
     distance: dict[str, pd.Series] = {}
+    numeric: dict[str, pd.Series] = {}
     columns: dict[str, list[str]] = {}
+    numeric_columns: dict[str, list[str]] = {}
     extracted: dict[str, set[str]] = {}
     index = pd.Index([t.key for t in trajectories], name="key")
     wanted = set(index)
@@ -97,12 +106,17 @@ def build_frame(
             q, d = _expand(feature, values[feature.name], index, vector_length)
             query.update(q)
             distance.update(d)
+            n = d if feature.type == "category" else q
+            numeric.update(n)
             columns[feature.name] = list(d)
+            numeric_columns[feature.name] = list(n)
             extracted[feature.name] = present[feature.name]
     return Frame(
         query=pd.DataFrame(query, index=index),
         distance=pd.DataFrame(distance, index=index),
+        numeric=pd.DataFrame(numeric, index=index).astype(float),
         columns=columns,
+        numeric_columns=numeric_columns,
         extracted=extracted,
     )
 

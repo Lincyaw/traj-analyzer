@@ -24,7 +24,16 @@ from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.operators.catalog import discover, load_groups
 from traj_analyzer.project import CONFIG_FILE, Config, ConfigError, Project
 from traj_analyzer.sampling import SamplerSpec, StrategySpec, enrich, load_sampler, sample, save
-from traj_analyzer.studies import contrast_pairs, list_studies, load_study, outcome_features, population, screen
+from traj_analyzer.studies import (
+    Population,
+    StudySpec,
+    check_study,
+    contrast_pairs,
+    list_studies,
+    load_study,
+    population,
+    screen,
+)
 from traj_analyzer.vectorize import Frame, build_frame
 
 DESCRIPTION = """\
@@ -115,14 +124,10 @@ def cmd_validate(instructions: Annotated[bool, typer.Option(help="Include render
     for name in samplers:
         load_sampler(project, name)
     report["samplers"] = samplers
-    features = {f.name for g in groups for f in g.features}
-    for name in list_studies(project):
-        study = load_study(project, name)
-        named = [*study.by, *([study.pairs.within] if study.pairs else [])]
-        unknown = sorted(set(named) - features)
-        if unknown:
-            raise ConfigError(f"Study {name} names features that are not enabled: {unknown}")
-    report["studies"] = list_studies(project)
+    studies = list_studies(project)
+    for name in studies:
+        check_study(load_study(project, name), groups)
+    report["studies"] = studies
     _emit(report)
 
 
@@ -157,7 +162,7 @@ def cmd_operators_list(tag: Annotated[str | None, typer.Option(help="Only operat
         operator = ref.operator
         if tag and tag not in operator.tags:
             continue
-        if kind and kind.value != operator.kind:
+        if kind and kind != operator.kind:
             continue
         rows.append({
             "name": name, "kind": operator.kind, "origin": ref.origin, "tags": list(operator.tags),
@@ -268,10 +273,10 @@ def cmd_discover(
     if not frame.columns:
         raise ConfigError(f"Groups {groups} have no extracted values; run `traj extract` for them first")
     spec = SamplerSpec(name="discover", budget=n, seed=seed, datasets=dataset,
-                       strategies=[StrategySpec(kind=method.value, quota="rest")])
+                       strategies=[StrategySpec(kind=method, quota="rest")])
     result = sample(spec, frame, load_groups(project, groups))
     rows = {row.key: row for row in load_index(project, dataset)}
-    _emit({"method": method.value, "population": result.population, "trajectories": [
+    _emit({"method": method, "population": result.population, "trajectories": [
         {"key": pick.key, "markdown": str(project.trajectory_path(pick.key, ".md")),
          "n_steps": rows[pick.key].n_steps, "chars": rows[pick.key].chars, "reason": pick.reason,
          "metadata": rows[pick.key].metadata}
@@ -384,22 +389,30 @@ def cmd_study_list() -> None:
 def cmd_study_pairs(name: str, n: Annotated[int | None, typer.Option(help="Override pairs.n.")] = None,
                     seed: int = 0) -> None:
     """Contrast pairs: trajectories sharing the `within` feature, one that succeeded and one that did not."""
-    project = Project.find()
-    study = load_study(project, name)
+    project, study, _, data = _study(name)
     if study.pairs is None:
         raise ConfigError(f"Study {name} has no pairs section")
     spec = study.pairs.model_copy(update={"n": n}) if n else study.pairs
-    groups = load_groups(project)
-    data = population(study, _frame(project, study.datasets), groups)
     pairs = contrast_pairs(spec, data, seed)
     for pair in pairs:
         for side in ["succeeded", "failed"]:
             pair[side] = {"key": pair[side], "markdown": str(project.trajectory_path(pair[side], ".md"))}
-    _emit({"study": name, "population": len(data.success), "success_rate": _rate(data.success), "pairs": pairs})
+    _emit({**_summary(study, data), "pairs": pairs})
 
 
-def _rate(success: Any) -> float | None:
-    return None if success.notna().sum() == 0 else round(float(success.dropna().astype(float).mean()), 3)
+def _study(name: str) -> tuple[Project, StudySpec, set[str], Population]:
+    """The project, the checked study, its outcome features and its population."""
+    project = Project.find()
+    study = load_study(project, name)
+    groups = load_groups(project)
+    outcomes = check_study(study, groups)
+    return project, study, outcomes, population(study, _frame(project, study.datasets), groups)
+
+
+def _summary(study: StudySpec, data: Population) -> dict[str, Any]:
+    success = data.success.dropna().astype(float)
+    return {"study": study.name, "population": len(data.success),
+            "success_rate": round(float(success.mean()), 3) if len(success) else None}
 
 
 @study_app.command("screen")
@@ -410,18 +423,13 @@ def cmd_study_screen(
 ) -> None:
     """Check features on the study population: constant, redundant, varying by a `by` feature, or explaining
     success once the `by` features are held fixed."""
-    project = Project.find()
-    study = load_study(project, name)
-    groups = load_groups(project)
-    data = population(study, _frame(project, study.datasets), groups)
-    outcomes = outcome_features(study, groups)
-    features = feature or [f for f in data.frame.columns if f not in outcomes and f not in study.by]
+    _, study, outcomes, data = _study(name)
+    features = feature or [f for f in data.frame.numeric_columns if f not in outcomes and f not in study.by]
     report = screen(study, data, features, outcomes)
     verdicts: dict[str, list[str]] = {}
     for feature_name, entry in report.items():
         verdicts.setdefault(entry["verdict"], []).append(feature_name)
-    _emit({"study": name, "population": len(data.success), "success_rate": _rate(data.success),
-           "rules": study.rules.model_dump(), "verdicts": verdicts, "features": report})
+    _emit({**_summary(study, data), "rules": study.rules.model_dump(), "verdicts": verdicts, "features": report})
 
 
 @app.command("agreement")
@@ -430,10 +438,13 @@ def cmd_agreement(reference: Annotated[str, typer.Argument(
     """Compare reference answers with the extracted features."""
     project = Project.find()
     answers = json.loads(Path(reference).read_text(encoding="utf-8"))
-    specs = {}
+    named = {feature for values in answers.values() for feature in values}
+    groups = load_groups(project)
+    specs = {f.name: f for g in groups for f in g.features}
     rows = {}
-    for group in load_groups(project):
-        specs.update({f.name: f for f in group.features})
+    for group in groups:
+        if named.isdisjoint(f.name for f in group.features):
+            continue
         for row in read_group(project, group.name):
             if row.key in answers:
                 rows[(row.key, row.feature)] = row
