@@ -9,17 +9,21 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from aifn import Worker
 from aifn.engines import ReplayEngine
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
 from traj_analyzer.adapters.claude_code import ClaudeCodeAdapter
 from traj_analyzer.adapters.messages import MessagesAdapter
 from traj_analyzer.cli import main
-from traj_analyzer.extract import extract
+from traj_analyzer.extract import coverage, extract
 from traj_analyzer.features.spec import output_model, render_instruction
+from traj_analyzer.features.table import read_group
 from traj_analyzer.ingest import ingest, load_index, render_markdown
 from traj_analyzer.operators.base import FeatureSpec, Operator
 from traj_analyzer.operators.catalog import discover, load_groups
@@ -27,6 +31,7 @@ from traj_analyzer.project import Project, RenderConfig
 from traj_analyzer.runtime import mailbox, policy, registry
 from traj_analyzer.sampling import expand_where, load_sampler, sample
 from traj_analyzer.vectorize import build_frame
+from traj_analyzer.viewer.server import create_app
 
 DATA = Path(__file__).parent / "data"
 REPLAY = DATA / "replay"
@@ -210,6 +215,54 @@ def test_code_operators_and_requires(project: Project) -> None:
     assert (per_tool_total[toucan] == frame.query.loc[toucan, "n_tool_calls"]).all()
 
 
+def test_feature_table_replaces_only_the_extracted_keys(project: Project) -> None:
+    keys = [row.key for row in load_index(project, ["toucan"])]
+    extract(project, groups=["fixture-tool_share"], keys=keys[:5])
+    extract(project, groups=["fixture-tool_share"], keys=keys[3:8])
+    (group,) = load_groups(project, ["fixture-tool_share"])
+    table = read_group(project, group)
+    assert sorted(table["key"].to_pylist()) == sorted(keys[:8])
+    assert table["tool_share__status"].to_pylist() == ["ok"] * 8
+
+    path = project.table_dir / "fixture-tool_share.parquet"
+    stored = pq.read_table(path)
+    pq.write_table(stored.set_column(stored.schema.get_field_index("tool_share"), "tool_share",
+                                     stored["tool_share"].cast(pa.string())), path)
+    assert read_group(project, group)["tool_share__status"].null_count == 8
+    assert coverage(project)["fixture-tool_share"] == {"extracted": 0, "missing": 70}
+
+
+def test_viewer_pages_searches_and_filters(project: Project) -> None:
+    extract(project, groups=["stats-basic", "fixture-tool_share"])
+    client = TestClient(create_app(project))
+    tables = {t["name"]: t for t in client.get("/api/tables").json()}
+    assert set(tables) == {"features", "stats-basic", "fixture-tool_share"}
+    assert tables["features"]["rows"] == 70
+    assert {"key", "dataset", "n_steps", "tool_share"} <= {c["name"] for c in tables["features"]["columns"]}
+    assert "tool_share__status" in {c["name"] for c in tables["fixture-tool_share"]["columns"]}
+    notes = {c["name"]: c["note"] for c in tables["features"]["columns"]}
+    assert notes["tool_share"].startswith("Share of steps that call tools.")
+    assert "Range: 0 to 1" in notes["tool_share"] and "operator: fixture.tool_share" in notes["tool_share"]
+
+    def rows(**body: Any) -> dict[str, Any]:
+        response = client.post("/api/rows", json={"table": "features", "page": 1, "size": 20, **body})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    first, last = rows(), rows(page=4)
+    assert (first["last_page"], first["last_row"], len(first["data"]), len(last["data"])) == (4, 70, 20, 10)
+    assert rows(search="ultrachat")["last_row"] == 40
+    assert rows(filters=[{"field": "dataset", "type": "like", "value": "TOUCAN"}])["last_row"] == 30
+    assert rows(where="tool_share IS NOT NULL")["last_row"] == 30
+    steps = [r["n_steps"] for r in rows(sorters=[{"field": "n_steps", "dir": "desc"}])["data"]]
+    assert steps == sorted(steps, reverse=True)
+    assert client.post("/api/rows", json={"table": "features", "page": 1, "size": 20,
+                                          "where": "no_such_column > 1"}).status_code == 400
+    assert client.post("/api/rows", json={"table": "features", "page": 1, "size": 20,
+                                          "where": "EXISTS (SELECT * FROM read_csv('traj.yaml'))"}).status_code == 400
+    assert client.get("/").status_code == 200
+
+
 def test_sampling_over_code_features(project: Project) -> None:
     extract(project, groups=["stats-basic", "stats-tool_usage"])
     groups = load_groups(project, ["stats-basic", "stats-tool_usage"])
@@ -267,7 +320,8 @@ def test_llm_extraction_replays_real_runs(project: Project, tmp_path: Path) -> N
     frame = build_frame(project, load_groups(project, ["outcome"]), rows, vector_length=4)
     assert frame.query["frustration"].between(0, 1).all()
     assert set(frame.query["task_type"]) <= {"lookup", "creative", "other"}
-    assert {"curve__t3", "time_split__tools"} <= set(frame.distance.columns)
+    assert frame.distance[["curve__t3", "time_split__tools"]].notna().all().all()
+    assert all(read_group(project, *load_groups(project, ["outcome"]))["frustration__evidence"].to_pylist())
 
 
 def test_llm_operators_skip_trajectories_they_do_not_apply_to(project: Project, tmp_path: Path) -> None:
@@ -307,7 +361,7 @@ def test_cli_extract_checks_samplers(project: Project, capsys: pytest.CaptureFix
                                                           encoding="utf-8")
     assert main(["extract", "--group", "stats-basic"]) == 2
     assert "SamplerSpec" in capsys.readouterr().err
-    assert not (project.table_dir / "stats-basic.jsonl").exists()
+    assert not (project.table_dir / "stats-basic.parquet").exists()
 
 
 def test_cli_operators_enable_and_disable(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
@@ -371,7 +425,7 @@ def test_meta_fields_copy_metadata_into_features(project: Project, capsys: pytes
     column = frame.query["subset"]
     assert {k: column[k] for k in expected} == expected
     assert column[[k for k in column.index if k.startswith("ultrachat/")]].isna().all()
-    assert {f"subset__{name.replace('-', '_')}" for name in expected.values()} <= set(frame.distance.columns)
+    assert {f"subset__{name}" for name in expected.values()} <= set(frame.distance.columns)
 
     strict = json.dumps({"key": "subset_name", "type": "category"})
     assert main(["operators", "disable", "meta"]) == 0

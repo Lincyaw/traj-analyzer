@@ -50,7 +50,7 @@ An analysis project is a git repository created by `traj init <dir>`:
 | `.traj/datasets/<dataset>/` | `<id>.json`, `<id>.md`, `index.jsonl` | no |
 | `.traj/instructions/` | instruction files generated for call groups | no |
 | `.traj/mailbox/` | aifn tasks and conclusions, which also serve as the cache | no |
-| `.traj/features/<group>.jsonl` | feature table | no |
+| `.traj/features/<group>.parquet` | feature table | no |
 | `.traj/samples/<sampler>/<run>/selection.json` | sampling results | no |
 
 Every change to operators, configuration, samplers and reports can be traced through diffs and commit messages.
@@ -311,9 +311,12 @@ Values returned by code operators are checked against the same types, and a fail
 5. When tasks are outstanding, start `extract.workers` subprocesses `python -m aifn worker traj_analyzer.runtime:make_worker --once`.
    Workers find the project through the environment variable `TRAJ_PROJECT` and build the same functions from the same configuration.
    Workers exit when the queue is empty, and any worker exiting with a non-zero code stops the command with an error.
-6. Read every conclusion and write `.traj/features/<group>.jsonl`, one line `{key, group, feature, value, evidence, status, detail}` per feature.
-   When the operator does not apply, `value` is empty and `detail` is `not applicable`.
+6. Read every conclusion and write `.traj/features/<group>.parquet`, one row per trajectory with the column `key` and, per feature, the columns `<feature>`, `<feature>__status`, `<feature>__detail`, and `<feature>__evidence` when the group cites evidence.
+   The value column has the Arrow type of the feature type: `float64` for scalar, `bool` for boolean, `string` for category, `list<string>` for set, `list<float64>` for vector and `map<string, float64>` for map.
+   When the operator does not apply, the value is null and the detail is `not applicable`.
    Refusals have status `refused`, execution failures `failed`, and per-chunk vectors whose length differs from the chunk count `invalid_length`.
+   A null status means the trajectory has no value for that feature.
+   Reading a group uses the schema of its current features: a feature the file lacks, or holds with another value type, reads as null for every trajectory until the next extraction writes it.
 
 The output reports each group of the run, and `coverage`: per enabled group, over every ingested trajectory, how many have rows in the feature table (`extracted`), those rows counted by status, and how many have none (`missing`).
 
@@ -369,6 +372,8 @@ Each feature expands into columns of the wide table:
 | map | one column per key, 0 when a trajectory's map lacks the key | same |
 
 Category, set and map features without `labels` use the 100 most frequent labels as columns.
+A label's column is `<feature>__<label>` with the label verbatim, so labels that differ only in punctuation or case keep separate columns; a `where` condition names a column holding characters other than letters, digits and underscores in backticks, such as `` `query_atoms__filter:service_name` > 0.5 ``.
+A set feature with a label named `count` stops with an error, since that label's column would be `<feature>__count`.
 The wide table reads the enabled features from the feature table and takes only values with status `ok`; rows with other statuses are empty in the wide table.
 `traj table` prints its query columns as CSV, one row per trajectory.
 Distance columns are standardized, and missing values are filled with the column mean.
@@ -438,10 +443,31 @@ The `traj-report` skill guides Claude Code through these steps:
 | `traj operators disable <name>` | remove the entries whose operator or instance name is `<name>` from `traj.yaml` |
 | `traj extract [--group g] [--dataset d] [--key k] [--limit n] [--workers n] [--dry-run]` | check the configuration and samplers, extract features, and report coverage per group |
 | `traj table [--dataset d] [--column c...]` | print the wide table as CSV |
+| `traj view [--host 127.0.0.1] [--port 8000]` | serve a web page for paging through, searching and filtering the feature table |
 | `traj sample [--sampler default] [--budget n]` | sample |
 
 Options that take several values repeat, such as `--group a --group b`.
 `operators enable` and `operators disable` validate the whole modified configuration before writing `traj.yaml`.
+
+`traj view` is a FastAPI application served by uvicorn, in `src/traj_analyzer/viewer/`.
+At start it loads the trajectory index and every group that has a table file into an in-memory DuckDB database, then switches off DuckDB's file access.
+The page offers the table `features`, which joins every group's value columns on `key` next to the trajectory's dataset, and each group's own table with its status, detail and evidence columns.
+The front end is one static page using Tabulator 6.5.3 with its `simple` theme, whose files are kept in `viewer/static/`; paging, sorting and filtering run on the server.
+The page has three ways to narrow the rows:
+- **Search box**: keeps rows where any column, printed as text, contains the words, ignoring case.
+- **Filter box under each column header**: keeps rows where that column contains the typed text, ignoring case.
+- **SQL condition field**: accepts a DuckDB `WHERE` condition such as `f1 < 0.3 AND gt_focused_query`, and shows DuckDB's error message when the condition is invalid.
+
+Cells are formatted by column type:
+- numbers are right aligned with at most three decimals;
+- booleans are shown as small labels;
+- sets and vectors are shown as a row of labels, one per item;
+- maps are shown as labels of key and value, sorted by value from largest to smallest.
+
+Hovering over a column header shows the feature's description, type, range, labels, thresholds, group and operator.
+The page follows the system's light or dark color scheme.
+Every response carries `Cache-Control: no-cache`, so the browser loads the current page files after an upgrade.
+The page shows the data as it was when `traj view` started, so restart it after `traj extract`.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 
 ## 9. Extension points

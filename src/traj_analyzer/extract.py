@@ -17,7 +17,7 @@ from uuid import uuid4
 from aifn import Call, Handle, Mailbox, Refused, Returned, Workspace
 
 from traj_analyzer.features.spec import ExtractRequest, value_validator
-from traj_analyzer.features.table import FeatureRow, read_group, write_group
+from traj_analyzer.features.table import KEY, FeatureRow, read_group, status_column, write_group
 from traj_analyzer.ingest import IndexRow, load_index, load_trajectory
 from traj_analyzer.operators.catalog import Group, Instance, load_groups
 from traj_analyzer.project import ConfigError, Project
@@ -116,20 +116,23 @@ def extract(
         handles = {row.key: handle for handle, row in issued[group.name]}
         out = _collect(group, rows, handles, applies[group.name], reports[group.name])
         if not dry_run:
-            write_group(project, group.name, out)
+            write_group(project, group, out)
     return [*code_reports, *reports.values()]
 
 
 def coverage(project: Project) -> dict[str, dict[str, int]]:
     """Per enabled group, over every ingested trajectory: how many have rows in the feature table, counted by status,
-    and how many have none. A trajectory whose rows differ in status counts under its first status other than ok."""
+    and how many have none. A trajectory whose features differ in status counts under its first status other than ok."""
     keys = {row.key for row in load_index(project)}
     report = {}
     for group in load_groups(project):
+        table = read_group(project, group)
+        columns = [table[status_column(f.name)].to_pylist() for f in group.features]
         statuses: dict[str, str] = {}
-        for row in read_group(project, group.name):
-            if row.key in keys and statuses.get(row.key, "ok") == "ok":
-                statuses[row.key] = row.status
+        for key, row in zip(table[KEY].to_pylist(), zip(*columns, strict=True), strict=True):
+            present = [status for status in row if status is not None]
+            if key in keys and present:
+                statuses[key] = next((status for status in present if status != "ok"), "ok")
         report[group.name] = {"extracted": len(statuses), "missing": len(keys) - len(statuses),
                               **Counter(statuses.values())}
     return report
@@ -153,7 +156,7 @@ def _scan(
         if dry_run:
             reports[group.name].pending = len(rows)
         else:
-            write_group(project, group.name, out[group.name])
+            write_group(project, group, out[group.name])
     return list(reports.values()), applies
 
 
@@ -205,18 +208,16 @@ def _scan_one(key: str) -> tuple[str, dict[str, dict[str, bool]], dict[str, tupl
     for group in _SCAN["code"]:
         (instance,) = group.instances
         if not instance.applies(trajectory):
-            computed[group.name] = (False, _not_applicable(group, instance, key))
+            computed[group.name] = (False, _not_applicable(instance, key))
             continue
         values = instance.compute(trajectory)
-        computed[group.name] = (True, [FeatureRow(key=key, group=group.name, feature=f.name,
-                                                  value=validators[f.name](values[f.name]))
+        computed[group.name] = (True, [FeatureRow(key=key, feature=f.name, value=validators[f.name](values[f.name]))
                                        for f in instance.features])
     return key, applied, computed
 
 
-def _not_applicable(group: Group, instance: Instance, key: str) -> list[FeatureRow]:
-    return [FeatureRow(key=key, group=group.name, feature=f.name, value=None, detail="not applicable")
-            for f in instance.features]
+def _not_applicable(instance: Instance, key: str) -> list[FeatureRow]:
+    return [FeatureRow(key=key, feature=f.name, detail="not applicable") for f in instance.features]
 
 
 def _identity(call: Call) -> str:
@@ -281,14 +282,14 @@ def _collect(
             report.refused += refused
             report.failed += not refused
             report.errors.append(f"{row.key}: {detail}")
-            out += [FeatureRow(key=row.key, group=group.name, feature=f.name,
+            out += [FeatureRow(key=row.key, feature=f.name,
                                status="refused" if refused else "failed", detail=detail) for f in group.features]
             continue
         data = outcome.value.model_dump(mode="json") if outcome is not None else {}
         report.ok += outcome is not None
         for instance in group.instances:
             if outcome is None or not applies[row.key][instance.id]:
-                out += _not_applicable(group, instance, row.key)
+                out += _not_applicable(instance, row.key)
                 continue
             for feature in instance.features:
                 answer, evidence = data[feature.name], None
@@ -298,6 +299,6 @@ def _collect(
                 if feature.per == "chunk" and len(answer) != row.n_chunks:
                     status = "invalid_length"
                     report.invalid += 1
-                out.append(FeatureRow(key=row.key, group=group.name, feature=feature.name, value=answer,
+                out.append(FeatureRow(key=row.key, feature=feature.name, value=answer,
                                       evidence=evidence, status=status))
     return out

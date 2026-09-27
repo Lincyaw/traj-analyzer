@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
-from traj_analyzer.features.table import read_group
+from traj_analyzer.features.table import KEY, feature_values, read_group, status_column
 from traj_analyzer.ingest import IndexRow
 from traj_analyzer.operators.base import FeatureSpec
 from traj_analyzer.operators.catalog import Group
@@ -69,11 +68,9 @@ class Frame:
         return np.hstack(parts)
 
 
-def ident(label: str) -> str:
-    cleaned = re.sub(r"\W", "_", str(label)).strip("_")
-    if not cleaned:
-        raise ConfigError(f"Label {label!r} has no characters usable in a column name")
-    return cleaned
+def label_column(feature: str, label: object) -> str:
+    """Column of one label of a category, set or map feature: the label verbatim, so distinct labels never share one."""
+    return f"{feature}__{label}"
 
 
 def build_frame(
@@ -87,21 +84,20 @@ def build_frame(
     index = pd.Index([t.key for t in trajectories], name="key")
     wanted = set(index)
     for group in groups:
-        values: dict[str, dict[str, object]] = {f.name: {} for f in group.features}
-        present: dict[str, set[str]] = {f.name: set() for f in group.features}
-        for row in read_group(project, group.name):
-            if row.key in wanted and row.feature in values:
-                present[row.feature].add(row.key)
-                if row.status == "ok":
-                    values[row.feature][row.key] = row.value
+        table = read_group(project, group)
+        keys = table[KEY].to_pylist()
         for feature in group.features:
-            if not present[feature.name]:
+            statuses = table[status_column(feature.name)].to_pylist()
+            present = {key for key, status in zip(keys, statuses, strict=True) if status is not None and key in wanted}
+            if not present:
                 continue
-            q, d = _expand(feature, values[feature.name], index, vector_length)
+            raw = {key: value for key, status, value in zip(keys, statuses, feature_values(table, feature), strict=True)
+                   if status == "ok" and key in wanted}
+            q, d = _expand(feature, raw, index, vector_length)
             query.update(q)
             distance.update(d)
             columns[feature.name] = list(d)
-            extracted[feature.name] = present[feature.name]
+            extracted[feature.name] = present
     return Frame(
         query=pd.DataFrame(query, index=index),
         distance=pd.DataFrame(distance, index=index),
@@ -121,12 +117,14 @@ def _expand(
             return {name: col}, {name: col}
         case "category":
             labels = list(feature.labels or ()) or _top_values(series)
-            onehot = {f"{name}__{ident(lb)}": (series == lb).astype(float).where(series.notna()) for lb in labels}
+            onehot = {label_column(name, lb): (series == lb).astype(float).where(series.notna()) for lb in labels}
             return {name: series.astype("string")}, onehot
         case "set":
             labels = list(feature.labels or ()) or _top_values(series)
+            if "count" in labels:
+                raise ConfigError(f"{name}: the label 'count' would share its column with {name}__count")
             multihot = {
-                f"{name}__{ident(lb)}": series.map(
+                label_column(name, lb): series.map(
                     lambda v, lb=lb: float(lb in v) if isinstance(v, list) else None)
                 for lb in labels
             }
@@ -136,7 +134,7 @@ def _expand(
             keys = list(feature.labels or ()) or _top_values(
                 series.map(lambda v: list(v) if isinstance(v, dict) else None))
             values = {
-                f"{name}__{ident(key)}": series.map(
+                label_column(name, key): series.map(
                     lambda v, key=key: float(v.get(key, 0.0)) if isinstance(v, dict) else None)
                 for key in keys
             }

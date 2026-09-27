@@ -26,6 +26,7 @@ traj operators list
 traj extract --group stats-basic --group stats-tool_usage
 traj extract --group dialogue --limit 5
 traj table > .traj/table.csv
+traj view
 traj sample
 ```
 
@@ -35,7 +36,8 @@ New data sources and new features are added as files: adapters in the project's 
 This repository carries two Claude Code skills in `.claude/skills/`: `traj-features` explains how features are defined and extracted, and `traj-report` writes reports.
 `traj init` copies them into every new analysis project.
 
-`traj table` prints CSV to stdout, and every other command prints JSON.
+`traj view` serves a web page at http://127.0.0.1:8000 for paging through, searching and filtering the feature table.
+`traj table` prints CSV to stdout, and every other command except `traj view` prints JSON.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 
 ## Development

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>traj viewer</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="tabulator_simple.min.css">
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="brand">
+      <span class="logo">traj</span>
+      <span class="project" id="project"></span>
+    </div>
+    <nav class="tables" id="tables" aria-label="Tables"></nav>
+  </header>
+  <section class="controls">
+    <label class="field search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="search" type="search" placeholder="Search every column" autocomplete="off">
+    </label>
+    <label class="field where">
+      <span class="tag">WHERE</span>
+      <input id="where" type="text" placeholder="f1 &lt; 0.3 AND gt_focused_query" autocomplete="off" spellcheck="false">
+    </label>
+    <button id="apply" class="primary">Apply</button>
+    <button id="reset" class="ghost">Reset</button>
+  </section>
+  <div class="error" id="error" hidden></div>
+  <main class="card">
+    <div id="grid"></div>
+  </main>
+  <script src="tabulator.min.js"></script>
+  <script src="viewer.js"></script>
+</body>
+</html>

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+import uvicorn
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
@@ -21,10 +22,11 @@ from traj_analyzer.operators.catalog import discover, load_groups
 from traj_analyzer.project import CONFIG_FILE, Config, ConfigError, Project
 from traj_analyzer.sampling import enrich, load_sampler, sample, save
 from traj_analyzer.vectorize import Frame, build_frame
+from traj_analyzer.viewer.server import create_app
 
 DESCRIPTION = """\
 Batch analysis of LLM trajectories.
-Every command except `table` prints one JSON document to stdout, and logs go to stderr.
+Every command except `table` and `view` prints one JSON document to stdout, and logs go to stderr.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 """
 
@@ -252,6 +254,13 @@ def cmd_sample(sampler: Annotated[str, typer.Option(help="Sampler name under sam
     }
     path = save(project, spec, selection)
     _emit({"selection": str(path), **selection})
+
+
+@app.command("view")
+def cmd_view(host: Annotated[str, typer.Option(help="Address to listen on.")] = "127.0.0.1",
+             port: Annotated[int, typer.Option(help="Port to listen on.")] = 8000) -> None:
+    """Browse the feature table in a web page: page through, search and filter every extracted group."""
+    uvicorn.run(create_app(Project.find()), host=host, port=port)
 
 
 def main(argv: list[str] | None = None) -> int:

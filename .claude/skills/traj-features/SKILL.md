@@ -133,7 +133,7 @@ Hide metadata an LLM must not see, such as evaluation results, with `render.hide
 
 1. `traj extract --group <group> --dry-run` writes the instruction a call group sends to `.traj/instructions/<group>.md` and reports how many LLM calls a full run needs; answers already in the mailbox are reused.
 2. `traj extract --group <group> --limit 5`, or `--key <key>` for chosen trajectories, runs a small trial.
-3. `.traj/features/<group>.jsonl` holds one row per trajectory and feature, with the value and its cited evidence.
+3. `.traj/features/<group>.parquet` holds one row per trajectory, with every feature's value and its cited evidence in the column `<feature>__evidence`.
    Open the trajectory's Markdown, `.traj/datasets/<dataset>/<id>.md`, and check every value against the cited step.
 4. When a value is wrong, first ask whether the question is atomic.
    A feature that is often wrong usually needs to be split into simpler features; rewording the same hard question rarely helps.
