@@ -13,6 +13,17 @@ from traj_analyzer.project import ConfigError, Project
 
 MAX_FREE_LABELS = 100
 """Columns for category, set and map features without labels: one per label, for the most frequent labels."""
+LABEL_TYPES = ("category", "set", "map")
+"""Feature types whose distance columns are one per label, kept on their own scale of 0 to 1."""
+
+
+@dataclass
+class Matrix:
+    """The space strategies measure: `x` holds the scaled columns, `raw` the value of each column before scaling."""
+
+    x: np.ndarray
+    columns: list[str]
+    raw: np.ndarray
 
 
 @dataclass
@@ -20,17 +31,19 @@ class Frame:
     """Two views of the feature table, both indexed by trajectory key.
 
     `query` holds readable columns for filtering, and `distance` holds numeric columns for clustering.
-    `columns` maps each feature to its columns in `distance`, and `extracted` to the keys it was extracted for.
+    `columns` maps each feature to its columns in `distance`, `types` to its feature type, and `extracted` to the keys
+    it was extracted for.
     """
 
     query: pd.DataFrame
     distance: pd.DataFrame
     columns: dict[str, list[str]] = field(default_factory=dict)
+    types: dict[str, str] = field(default_factory=dict)
     extracted: dict[str, set[str]] = field(default_factory=dict)
 
     def rows(self, index: pd.Index) -> Frame:
         return Frame(query=self.query.loc[index], distance=self.distance.loc[index], columns=self.columns,
-                     extracted=self.extracted)
+                     types=self.types, extracted=self.extracted)
 
     def complete(self, features: list[str]) -> Frame:
         """Keep the trajectories that have a row for every one of `features` in the feature table.
@@ -46,26 +59,44 @@ class Frame:
             mask &= self.distance.index.isin(list(self.extracted[feature]))
         return self.rows(self.distance.index[mask])
 
-    def matrix(self, weights: dict[str, float]) -> np.ndarray:
-        """Standardize every column, fill missing values with the column mean, and apply weights.
+    def matrix(self, weights: dict[str, float]) -> Matrix:
+        """Scale each feature as a whole so its columns' variances sum to its weight squared.
 
-        A feature's weight is divided by the square root of its column count.
+        Scalar, boolean and vector columns are standardized first. Label columns of category, set and map features
+        keep their 0 to 1 values, so a label few trajectories have adds little to distances. A trajectory without a
+        value for a feature has 0 in its label columns or the mean in its other columns, and 1 in the column
+        `<feature>__missing`, which exists when some trajectory lacks the value.
         """
         unknown = sorted(set(weights) - set(self.columns))
         if unknown:
             raise ConfigError(f"No extracted values for sampler features {unknown}")
-        parts = []
+        scaled, raw = [], []
         for feature, weight in weights.items():
             if weight == 0:
                 continue
-            cols = self.columns[feature]
-            block = self.distance[cols].astype(float)
-            std = block.std(ddof=0).replace(0, 1.0)
-            block = ((block - block.mean()) / std).fillna(0.0)
-            parts.append(block.to_numpy() * weight / np.sqrt(len(cols)))
-        if not parts:
+            values = self.distance[self.columns[feature]].astype(float)
+            missing = values.isna().all(axis=1)
+            if self.types[feature] in LABEL_TYPES:
+                block = values.fillna(0.0)
+            else:
+                block = ((values - values.mean()) / values.std(ddof=0).replace(0, 1.0)).fillna(0.0)
+            if missing.any():
+                name = missing_column(feature)
+                if name in values.columns:
+                    raise ConfigError(f"{feature}: the label 'missing' would share its column with {name}")
+                block[name] = missing.astype(float)
+                values[name] = missing.astype(float)
+            total = float(block.var(ddof=0).sum())
+            scaled.append(block * weight / np.sqrt(total) if total > 0 else block)
+            raw.append(values)
+        if not scaled:
             raise ConfigError("The sampler has no features with extracted values")
-        return np.hstack(parts)
+        x = pd.concat(scaled, axis=1)
+        return Matrix(x=x.to_numpy(), columns=list(x.columns), raw=pd.concat(raw, axis=1).to_numpy())
+
+
+def missing_column(feature: str) -> str:
+    return f"{feature}__missing"
 
 
 def label_column(feature: str, label: object) -> str:
@@ -80,6 +111,7 @@ def build_frame(
     query: dict[str, pd.Series] = {}
     distance: dict[str, pd.Series] = {}
     columns: dict[str, list[str]] = {}
+    types: dict[str, str] = {}
     extracted: dict[str, set[str]] = {}
     index = pd.Index([t.key for t in trajectories], name="key")
     wanted = set(index)
@@ -97,11 +129,13 @@ def build_frame(
             query.update(q)
             distance.update(d)
             columns[feature.name] = list(d)
+            types[feature.name] = feature.type
             extracted[feature.name] = present
     return Frame(
         query=pd.DataFrame(query, index=index),
         distance=pd.DataFrame(distance, index=index),
         columns=columns,
+        types=types,
         extracted=extracted,
     )
 

@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -29,8 +30,8 @@ from traj_analyzer.operators.base import FeatureSpec, Operator
 from traj_analyzer.operators.catalog import discover, load_groups
 from traj_analyzer.project import Project, RenderConfig
 from traj_analyzer.runtime import mailbox, policy, registry
-from traj_analyzer.sampling import expand_where, load_sampler, sample
-from traj_analyzer.vectorize import build_frame
+from traj_analyzer.sampling import SamplerSpec, StrategySpec, expand_where, load_sampler, sample
+from traj_analyzer.vectorize import Frame, build_frame
 from traj_analyzer.viewer.server import create_app
 
 DATA = Path(__file__).parent / "data"
@@ -261,6 +262,74 @@ def test_viewer_pages_searches_and_filters(project: Project) -> None:
     assert client.post("/api/rows", json={"table": "features", "page": 1, "size": 20,
                                           "where": "EXISTS (SELECT * FROM read_csv('traj.yaml'))"}).status_code == 400
     assert client.get("/").status_code == 200
+
+
+def frame_of(distance: dict[str, list[float]], types: dict[str, str], columns: dict[str, list[str]],
+             query: dict[str, list[Any]] | None = None) -> Frame:
+    index = pd.Index([f"k{i}" for i in range(len(next(iter(distance.values()))))], name="key")
+    return Frame(query=pd.DataFrame(query or {}, index=index), distance=pd.DataFrame(distance, index=index),
+                 columns=columns, types=types, extracted={f: set(index) for f in columns})
+
+
+def outlier_spec(**strategy: Any) -> SamplerSpec:
+    return SamplerSpec(name="t", budget=strategy.pop("budget", 1), features=strategy.pop("features", "all"),
+                       strategies=[StrategySpec(kind="outlier", quota="rest", **strategy)])
+
+
+def test_rare_labels_add_little_to_distances() -> None:
+    rng = np.random.default_rng(0)
+    rare = [0.0] * 200
+    rare[0] = 0.5
+    frame = frame_of({"m__common": list(rng.uniform(size=200)), "m__rare": rare, "s": list(rng.normal(size=200))},
+                     {"m": "map", "s": "scalar"}, {"m": ["m__common", "m__rare"], "s": ["s"]})
+    matrix = frame.matrix({"m": 1.0, "s": 1.0})
+    variance = pd.Series(matrix.x.var(axis=0), index=matrix.columns)
+    assert variance[["m__common", "m__rare"]].sum() == pytest.approx(1.0)
+    assert variance["s"] == pytest.approx(1.0)
+    assert variance["m__rare"] < 0.02
+
+
+def test_weights_steer_outliers() -> None:
+    a, b = [0.0] * 50, [0.0] * 50
+    for i in range(50):
+        a[i] = b[i] = (i % 7) / 7
+    a[0], b[1] = 30.0, 30.0
+    frame = frame_of({"a": a, "b": b}, {"a": "scalar", "b": "scalar"}, {"a": ["a"], "b": ["b"]})
+    for weights, expected in (({"a": 1.0, "b": 0.01}, "k0"), ({"a": 0.01, "b": 1.0}, "k1")):
+        (pick,) = sample(outlier_spec(features=weights), frame, []).picks
+        assert pick.key == expected
+        assert pick.reason["columns"][0]["column"] == max(weights, key=weights.__getitem__)
+
+
+def test_missing_values_set_a_trajectory_apart() -> None:
+    rng = np.random.default_rng(1)
+    share = list(rng.uniform(0.4, 0.6, size=100))
+    scalar = list(rng.normal(size=100))
+    share[7], scalar[7] = np.nan, np.nan
+    frame = frame_of({"m__x": share, "s": scalar}, {"m": "map", "s": "scalar"}, {"m": ["m__x"], "s": ["s"]})
+    matrix = frame.matrix({"m": 1.0, "s": 1.0})
+    assert {"m__missing", "s__missing"} <= set(matrix.columns)
+    (pick,) = sample(outlier_spec(), frame, []).picks
+    assert pick.key == "k7"
+    assert {c["column"] for c in pick.reason["columns"][:2]} <= {"m__x", "m__missing", "s__missing"}
+
+
+def test_outliers_relative_to_a_group() -> None:
+    rng = np.random.default_rng(2)
+    tight = list(rng.normal(0, 0.1, size=50))
+    tight[3] = 0.8
+    values = tight + list(rng.normal(5, 3, size=50)) + [0.0, 0.1]
+    groups = ["tight"] * 50 + ["wide"] * 50 + ["tiny"] * 2
+    frame = frame_of({"v": values}, {"v": "scalar"}, {"v": ["v"]}, query={"model": groups})
+    overall = sample(outlier_spec(budget=2), frame, []).picks
+    assert {p.key for p in overall} <= {f"k{i}" for i in range(50, 100)}
+    result = sample(outlier_spec(budget=2, relative_to="model"), frame, [])
+    assert "k3" in {p.key for p in result.picks}
+    assert result.strategies[0].unscored == 2
+    pick = next(p for p in result.picks if p.key == "k3")
+    assert pick.reason["group"] == "tight" and pick.reason["group_size"] == 50
+    with pytest.raises(ValidationError):
+        StrategySpec(kind="diversity", quota="rest", relative_to="model")
 
 
 def test_sampling_over_code_features(project: Project) -> None:

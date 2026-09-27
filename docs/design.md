@@ -376,8 +376,10 @@ A label's column is `<feature>__<label>` with the label verbatim, so labels that
 A set feature with a label named `count` stops with an error, since that label's column would be `<feature>__count`.
 The wide table reads the enabled features from the feature table and takes only values with status `ok`; rows with other statuses are empty in the wide table.
 `traj table` prints its query columns as CSV, one row per trajectory.
-Distance columns are standardized, and missing values are filled with the column mean.
-Each feature's weight is divided by the square root of its column count, so features with many columns do not dominate distances.
+Distance columns of scalar, boolean and vector features are standardized.
+Label columns of category, set and map features keep their values from 0 to 1, so a label few trajectories have adds little to distances.
+Each feature is then scaled as a whole so that the variances of its columns sum to its weight squared, so a feature with many columns weighs as much as one with a single column.
+A trajectory without a value for a feature gets 0 in its label columns and the mean in its other columns, and 1 in the column `<feature>__missing`, which the feature gets when any trajectory in the population lacks its value; a missing value thus sets a trajectory apart from the typical one.
 
 ### 6.2 Strategies
 
@@ -395,7 +397,6 @@ strategies:
   - kind: outlier
     label: outlier
     quota: 0.25
-    method: isolation_forest
   - kind: diversity
     label: diverse
     quota: rest
@@ -410,11 +411,17 @@ Strategies run in order, and a trajectory picked once is not picked again.
 | kind | Method | Reason recorded |
 |---|---|---|
 | `target` | filter with `pandas.DataFrame.query` on `where`, with `{feature.threshold}` replaced by the threshold from the feature definition, then pick within the subset as `within` says | the condition, the number of matches, and the ranking value or cluster |
-| `outlier` | score with `isolation_forest` or `knn` and take the highest scores | method, score, rank |
+| `outlier` | score each trajectory by its mean distance to its 10 nearest neighbours and take the highest scores | score, rank, and with `relative_to` the group, its size, its median score and the relative score |
 | `diversity` | cluster into quota clusters with KMeans; clusters take turns from the largest down, each giving its free member nearest the centre | cluster number, size and share |
-| `random` | pick at random | none |
+| `random` | pick at random | none beyond the columns |
 
 `within` is `diversity`, `random`, `top:<column>` or `bottom:<column>`.
+`relative_to`, for `outlier` only, names a query column such as `model`: neighbours come from the trajectories sharing its value, and the ranking uses the score divided by the median score of that group, so each group's own unusual trajectories can rank.
+Groups with fewer than 3 trajectories, and trajectories without a value in that column, are not scored, and the strategy report counts them as `unscored`.
+Nearest-neighbour distances follow the scaling above, so feature weights act on outliers as they do on clusters.
+
+Every reason also holds `columns`: the 5 columns where the pick stands furthest from what it is compared with, each with its value before scaling and its deviation in scaled units.
+An outlier is compared with the mean of its neighbours, a diversity pick with the mean of the population it was clustered from, and any other pick with the mean of the trajectories its strategy chose from.
 The result is written to `selection.json` and printed to stdout.
 It holds the population size, each strategy's quota, picks and target matches, and the list of picks.
 Each pick holds the key, the rendered file, the strategy, the reason, and every query column of the trajectory.

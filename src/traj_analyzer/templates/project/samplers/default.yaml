@@ -12,7 +12,6 @@ strategies:
   - kind: outlier
     label: outlier
     quota: 0.3
-    method: isolation_forest
   - kind: diversity
     label: diverse
     quota: rest
