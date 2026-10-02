@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 from dataclasses import asdict
 from enum import StrEnum
-from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -21,6 +19,7 @@ from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.operators.catalog import discover, load_groups
 from traj_analyzer.project import CONFIG_FILE, Config, ConfigError, Project
 from traj_analyzer.sampling import enrich, load_sampler, sample, save
+from traj_analyzer.scaffold import InitError, init_project
 from traj_analyzer.vectorize import Frame, build_frame
 from traj_analyzer.viewer.server import create_app
 
@@ -29,9 +28,6 @@ Batch analysis of LLM trajectories.
 Every command except `table` and `view` prints one JSON document to stdout, and logs go to stderr.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 """
-
-# Packaging drops files whose names start with a dot, so templates store these without it.
-_DOTTED = {"gitignore": ".gitignore", "claude": ".claude"}
 
 app = typer.Typer(help=DESCRIPTION, no_args_is_help=True, add_completion=False, pretty_exceptions_enable=False)
 adapters_app = typer.Typer(help="Data sources.", no_args_is_help=True)
@@ -55,21 +51,8 @@ def _emit(data: Any) -> None:
 @app.command("init")
 def cmd_init(directory: Annotated[str, typer.Argument(help="Directory of the new project.")],
              force: Annotated[bool, typer.Option(help="Overwrite an existing traj.yaml.")] = False) -> None:
-    """Create an analysis project skeleton."""
-    target = Path(directory).expanduser().resolve()
-    if (target / CONFIG_FILE).exists() and not force:
-        raise ConfigError(f"{target / CONFIG_FILE} already exists; use --force to overwrite")
-    written = []
-    with as_file(files("traj_analyzer") / "templates" / "project") as root:
-        for path in sorted(root.rglob("*")):
-            if path.is_dir() or "__pycache__" in path.parts:
-                continue
-            relative = Path(*(_DOTTED.get(p, p) for p in path.relative_to(root).parts))
-            destination = target / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, destination)
-            written.append(str(relative))
-    _emit({"project": str(target), "files": written})
+    """Create an analysis project with shared skills for Codex and Claude Code."""
+    _emit(init_project(Path(directory), force=force))
 
 
 @app.command("ingest")
@@ -268,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         app(args=argv, prog_name="traj")
     except SystemExit as exit:
         return exit.code if isinstance(exit.code, int) else 0
-    except (ConfigError, ValidationError) as error:
+    except (ConfigError, InitError, ValidationError) as error:
         print(json.dumps({"error": str(error)}, ensure_ascii=False), file=sys.stderr)
         return 2
     return 0

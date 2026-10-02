@@ -3,7 +3,7 @@
 ## 1. Goal
 
 traj-analyzer analyses batches of LLM trajectories in any format.
-A set of enabled operators turns each trajectory into features, a sampler picks the few trajectories most worth reading in that feature space, and Claude Code reads them and writes an insight report.
+A set of enabled operators turns each trajectory into features, a sampler picks the few trajectories most worth reading in that feature space, and Codex or Claude Code reads them and writes an insight report.
 
 Both people and agents use it.
 Every command runs non-interactively, prints one JSON document to stdout, or CSV for `traj table`, and writes logs to stderr.
@@ -19,7 +19,7 @@ flowchart TD
     md -->|traj extract| table
     table -->|vectorize| frame[Wide table and distance matrix]
     frame -->|traj sample| picks[Picks, each with the reason it was chosen]
-    picks --> report["Claude Code reads the picks and writes reports/*.md"]
+    picks --> report["Codex or Claude Code reads the picks and writes reports/*.md"]
     report -->|revise operators and config, commit| config
 ```
 
@@ -28,10 +28,16 @@ The work splits into two layers:
 | Layer | Responsibility | Form |
 |---|---|---|
 | `traj` CLI | ingest, render, chunk, manage operators, schedule extraction, store, vectorize, sample | Python package with deterministic steps, a typer application |
-| Claude Code skills | write operators, read samples, write reports, feed findings back into operators and config | `.claude/skills/` of the tool repository, copied into every analysis project by `traj init` |
+| Shared agent skills | write operators, read samples, write reports, feed findings back into operators and config | `.claude/skills/` holds the content, `.agents/skills/` links to it for Codex; both are installed by `traj init` |
 
 The skills are written once, in `.claude/skills/` of the tool repository.
 The project template `src/traj_analyzer/templates/project/claude/skills/` holds a symbolic link to each skill file, so the package ships their content, and a new skill file needs a link there as well.
+Codex discovers the same repository skills through relative directory links in `.agents/skills/`.
+`traj init` copies the packaged skill files into the analysis project's `.claude/skills/` and links each `.agents/skills/<name>` directory to `../../.claude/skills/<name>`.
+Linking the whole skill directory shares `SKILL.md` and any scripts, references or assets.
+The links stay valid when the analysis project is moved.
+The initializer discovers all bundled skill directories and checks for conflicting Codex destinations before copying files.
+An existing matching link is reused; a conflicting destination is a configuration error even with `--force`.
 
 ## 3. Analysis project
 
@@ -45,8 +51,9 @@ An analysis project is a git repository created by `traj init <dir>`:
 | `operators/**/*.py` | project operators, one per file | yes |
 | `samplers/<name>.yaml` | sampling strategies | yes |
 | `adapters/*.py` | project adapters, one per file | yes |
-| `reports/*.md` | reports written by Claude Code | yes |
-| `.claude/skills/` | the skills `traj-features` and `traj-report`, copied from the tool repository | yes |
+| `reports/*.md` | reports written by Codex or Claude Code | yes |
+| `.claude/skills/` | shared skill content copied from the tool repository | yes |
+| `.agents/skills/<name>` | relative directory links to the shared skills for Codex | yes |
 | `.traj/datasets/<dataset>/` | `<id>.json`, `<id>.md`, `index.jsonl` | no |
 | `.traj/instructions/` | instruction files generated for call groups | no |
 | `.traj/mailbox/` | aifn tasks and conclusions, which also serve as the cache | no |
@@ -428,7 +435,7 @@ Each pick holds the key, the rendered file, the strategy, the reason, and every 
 
 ## 7. Reports and feedback
 
-The `traj-report` skill guides Claude Code through these steps:
+The `traj-report` skill guides Codex or Claude Code through these steps:
 
 1. Run `traj extract` for the groups the sampler uses, and check in its `coverage` that they have no `missing` trajectories.
 2. Write `traj table` to a CSV file and read it with pandas for the overall distributions.
@@ -441,7 +448,7 @@ The `traj-report` skill guides Claude Code through these steps:
 
 | Command | Purpose |
 |---|---|
-| `traj init <dir>` | create an analysis project |
+| `traj init <dir>` | create an analysis project with shared skills for Codex and Claude Code |
 | `traj ingest [dataset...]` | read raw data and write the unified and rendered files |
 | `traj adapters list` | list built-in and project adapters and the datasets using them |
 | `traj operators list [--tag t] [--kind code\|llm]` | list built-in and project operators and where they are enabled |

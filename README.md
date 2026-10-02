@@ -1,7 +1,7 @@
 # traj-analyzer
 
 traj-analyzer analyses batches of LLM trajectories in any format.
-Operators you choose to enable turn each trajectory into features, a sampler picks the few trajectories most worth reading, and Claude Code reads them and writes a report.
+Operators you choose to enable turn each trajectory into features, a sampler picks the few trajectories most worth reading, and Codex or Claude Code reads them and writes a report.
 An operator is one Python file; the built-in library lives in `src/traj_analyzer/operators/library/`, and an analysis project adds its own in `operators/`.
 The design is in [docs/design.md](docs/design.md).
 
@@ -33,8 +33,11 @@ traj sample
 The `traj.yaml` created by `traj init` enables every general operator of the built-in library, and the seven LLM operators share the `dialogue` call group.
 New data sources and new features are added as files: adapters in the project's `adapters/`, operators in the project's `operators/`, as the "Extension points" section of the design describes.
 `traj extract` checks the configuration before it runs and reports, per execution group, how many trajectories have features.
-This repository carries two Claude Code skills in `.claude/skills/`: `traj-features` explains how features are defined and extracted, and `traj-report` writes reports.
-`traj init` copies them into every new analysis project.
+This repository provides two shared skills for Codex and Claude Code: `traj-features` explains how features are defined and extracted, and `traj-report` writes reports.
+`traj init` installs them into `.claude/skills/` and creates relative directory links in `.agents/skills/` for Codex.
+Both agents read the same skill files, including any later project edits or supporting resources.
+The tool repository uses the same directory arrangement; maintain skill content in `.claude/skills/`.
+Launch either agent in the analysis project to define features or write reports.
 
 `traj view` serves a web page at http://127.0.0.1:8000 for paging through, searching and filtering the feature table.
 `traj table` prints CSV to stdout, and every other command except `traj view` prints JSON.

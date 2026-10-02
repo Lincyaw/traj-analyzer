@@ -171,6 +171,19 @@ def test_init_copies_the_repository_skills(tmp_path: Path) -> None:
     for name in names:
         assert not (copied / name).is_symlink()
         assert (copied / name).read_bytes() == (source / name).read_bytes()
+    codex = tmp_path / ".agents" / "skills"
+    for skill in source.iterdir():
+        if not skill.is_dir():
+            continue
+        link = codex / skill.name
+        assert link.is_symlink() and not link.readlink().is_absolute()
+        assert link.resolve() == (copied / skill.name).resolve()
+        assert (link / "SKILL.md").read_bytes() == (skill / "SKILL.md").read_bytes()
+    assert main(["init", str(tmp_path), "--force"]) == 0
+    moved = tmp_path.with_name(f"{tmp_path.name}-moved")
+    tmp_path.rename(moved)
+    for name in names:
+        assert (moved / ".agents" / "skills" / name).read_bytes() == (source / name).read_bytes()
 
 
 def test_groups_follow_enabled_operators(project: Project) -> None:
