@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel
+from ruamel.yaml import YAML
 
 from traj_analyzer.files import load_module
 from traj_analyzer.operators.base import FeatureSpec, Operator
-from traj_analyzer.project import CallConfig, ConfigError, OperatorUse, Project
+from traj_analyzer.project import CONFIG_FILE, CallConfig, Config, ConfigError, OperatorUse, Project
 from traj_analyzer.schema import Trajectory
 
 LIBRARY = Path(__file__).parent / "library"
@@ -143,6 +146,47 @@ def load_groups(project: Project, only: list[str] | None = None) -> list[Group]:
             raise ConfigError(f"Unknown groups: {sorted(missing)}")
         groups = [g for g in groups if g.name in only]
     return groups
+
+
+TRIAL = "mined-trial"
+"""Name of the group of LLM candidates a mining round extracts before deciding on them."""
+
+
+def trial_group(project: Project) -> Group | None:
+    """The candidates under trial, read from the file the mining round wrote; None outside a round."""
+    if not project.trial_path.is_file():
+        return None
+    use = OperatorUse(use="llm.features", alias=TRIAL, params=json.loads(project.trial_path.read_text("utf-8")))
+    return Group(name=TRIAL, kind="llm", instances=[instantiate(discover(project)["llm.features"], use)],
+                 evidence=True)
+
+
+def runtime_groups(project: Project) -> list[Group]:
+    """Every group a worker may be asked to run: the enabled groups and the candidates under trial."""
+    trial = trial_group(project)
+    return [*load_groups(project), *([trial] if trial else [])]
+
+
+def edit_operators(project: Project, change: Callable[[list[Any]], None]) -> Project:
+    """Apply `change` to the operators list of traj.yaml, validate the result, then write it back.
+
+    The file keeps its comments and layout. Returns the project with the new configuration.
+    """
+    path = project.root / CONFIG_FILE
+    editor = YAML()
+    editor.preserve_quotes = True
+    editor.width = 4096
+    editor.indent(mapping=2, sequence=4, offset=2)
+    editor.representer.add_representer(
+        type(None), lambda representer, _: representer.represent_scalar("tag:yaml.org,2002:null", "null"))
+    document = editor.load(path)
+    if "operators" not in document:
+        document["operators"] = []
+    change(document["operators"])
+    edited = Project(project.root, Config.model_validate(json.loads(json.dumps(document))))
+    load_groups(edited)
+    editor.dump(document, path)
+    return edited
 
 
 def _check_names(groups: list[Group]) -> None:

@@ -59,6 +59,10 @@ An analysis project is a git repository created by `traj init <dir>`:
 | `.traj/mailbox/` | aifn tasks and conclusions, which also serve as the cache | no |
 | `.traj/features/<group>.parquet` | feature table | no |
 | `.traj/samples/<sampler>/<run>/selection.json` | sampling results | no |
+| `.traj/evaluation/` | second measurements per group and `features.json`, the result of `traj evaluate` | no |
+| `.traj/mining/<round>/` | proposals, candidates, trial values and `report.json` of one mining round | no |
+
+`traj mine` writes the code operators it accepts to `operators/mined/<name>.py` and the LLM features it accepts to `traj.yaml`, so they are in git like every other operator.
 
 Every change to operators, configuration, samplers and reports can be traced through diffs and commit messages.
 Everything under `.traj/` can be regenerated from those files and the raw data.
@@ -217,6 +221,7 @@ The built-in library:
 | `stats.basic` | code | `n_steps`, `n_user_turns`, `total_chars`, `duration_minutes` | scalar |
 | `stats.tool_usage` | code | `n_tool_calls`, `tool_error_rate` | scalar |
 | | | `tool_calls`, `tool_errors`: calls and errors per tool | map |
+| `stats.tool_paths` | code | `tool_paths`: one path per tool call, the tool name and then its outcome | paths |
 | `meta.fields` | code | chosen metadata fields, set by the `fields` parameter | per parameter |
 | `task.request_kinds` | llm | `request_kinds`: the kinds of request the user's messages make | set |
 | `user.complains` | llm | `user_complains`: the user writes that they are unhappy with the assistant | boolean |
@@ -225,8 +230,12 @@ The built-in library:
 | `user.approves` | llm | `user_approves`: the user accepts the result | boolean |
 | `assistant.claims_done` | llm | `assistant_claims_done`: the assistant writes that the task is done | boolean |
 | `assistant.asks_user` | llm | `assistant_asks_user`: the assistant asks the user a question | boolean |
+| `llm.features` | llm | features defined in `traj.yaml`, set by the `features` parameter | boolean, category or set |
 
 Every built-in LLM feature is atomic and can be answered by finding one statement.
+
+The `features` parameter of `llm.features` maps feature names to a definition with `type`, `description`, optional `labels`, and optional `guidance`, the judging criteria written into the instruction.
+An LLM feature needs nothing beyond its `FeatureSpec`, so this operator defines one in configuration without a Python file; `traj mine` adds the LLM features it accepts through it.
 
 The `fields` parameter of `meta.fields` maps feature names to field definitions.
 A field definition has the metadata key `key`, the feature type `type` (`boolean`, `scalar`, `category`, `set` or `map`), and optional `labels`, `range`, `thresholds` and `required`.
@@ -290,7 +299,11 @@ One LLM group is one aifn `AiFunction`: each trajectory gets one call, and the m
 | `vector` | an ordered list of numbers | `per: chunk` or `length: k` | `range` for every element | errors per chunk |
 | `map` | label to number | | `labels` for the keys, any non-empty string without them; `range` for the values | calls per tool |
 
+| `paths` | a list of paths, one per event of the trajectory in order; a path has one label per level | `levels`, the level names from the coarsest to the finest | | every query as kinds, scope, measures |
+
 `boolean`, `set`, `vector` and `map` are the four basic shapes; `scalar` and `category` are a vector and a set with one element.
+`paths` is the shape for events inside a trajectory, such as tool calls: each level of a path refines the level before it, so the paths of a population form a tree that section 6.3 cuts by support.
+Only code operators produce paths.
 Every type can carry `thresholds`, which sampling conditions reference by name.
 Values returned by code operators are checked against the same types, and a failed check stops extraction with an error.
 
@@ -377,6 +390,7 @@ Each feature expands into columns of the wide table:
 | set | one multi-hot column per label, and `name__count` | one multi-hot column per label |
 | vector | `name__max`, `__min`, `__mean`, `__first`, `__last` | the vector resampled to `sampling.vector_length` points, plus the five aggregates |
 | map | one column per key, 0 when a trajectory's map lacks the key | same |
+| paths | one column per node of the cut (section 6.3), `name__count` and `name__rare` | one column per node of the cut |
 
 Category, set and map features without `labels` use the 100 most frequent labels as columns.
 A label's column is `<feature>__<label>` with the label verbatim, so labels that differ only in punctuation or case keep separate columns; a `where` condition names a column holding characters other than letters, digits and underscores in backticks, such as `` `query_atoms__filter:service_name` > 0.5 ``.
@@ -409,7 +423,8 @@ strategies:
     quota: rest
 ```
 
-`features` is `all`, a list of feature names, or a map from feature name to weight.
+`features` is `all`, `distinguishing`, a list of feature names, or a map from feature name to weight.
+`distinguishing` takes the features whose role in `.traj/evaluation/features.json` is distinguishing (section 10.3), and stops with an error when `traj evaluate` has not run.
 `population` defaults to `complete`, which samples only trajectories with a feature-table row for every sampler feature; rows with empty values count, such as an operator that does not apply, `tool_error_rate` without tool results, or a refused or failed model call.
 `population: all` samples every trajectory.
 `quota` is a fraction between 0 and 1, an integer, or `rest`.
@@ -421,6 +436,9 @@ Strategies run in order, and a trajectory picked once is not picked again.
 | `outlier` | score each trajectory by its mean distance to its 10 nearest neighbours and take the highest scores | score, rank, and with `relative_to` the group, its size, its median score and the relative score |
 | `diversity` | cluster into quota clusters with KMeans; clusters take turns from the largest down, each giving its free member nearest the centre | cluster number, size and share |
 | `random` | pick at random | none beyond the columns |
+| `surprise` | rank the trajectories outside the reference set by their surprisal under the reference set (section 10.1) and take the highest | surprisal, rank, and the 5 columns or relations with the highest surprisal, each with its value and how many reference trajectories share it |
+
+A `surprise` strategy stops with an error when every trajectory is in the reference set.
 
 `within` is `diversity`, `random`, `top:<column>` or `bottom:<column>`.
 `relative_to`, for `outlier` only, names a query column such as `model`: neighbours come from the trajectories sharing its value, and the ranking uses the score divided by the median score of that group, so each group's own unusual trajectories can rank.
@@ -432,6 +450,34 @@ An outlier is compared with the mean of its neighbours, a diversity pick with th
 The result is written to `selection.json` and printed to stdout.
 It holds the population size, each strategy's quota, picks and target matches, and the list of picks.
 Each pick holds the key, the rendered file, the strategy, the reason, and every query column of the trajectory.
+
+### 6.3 Path trees
+
+The paths of a population form a tree: a node is a prefix of a path, and its children refine it.
+This is the index a log parser builds over log lines, with one difference: each level is a facet the operator names, so the levels are exact labels and no token position or similarity threshold decides them.
+
+| Quantity of a node | Meaning |
+|---|---|
+| support | trajectories with at least one event under the node |
+| events | events under the node |
+
+A node is frequent when its support reaches `sampling.path_support` of the trajectories that have a value, 1% by default.
+Support never grows with depth, so the frequent nodes form a subtree, and every event belongs to its deepest frequent prefix: the node it is cut at.
+Common branches are followed to the last level and rare ones stop at an ancestor, so every event has a column and none is dropped.
+
+In the wide table, the column of a node holds the share of a trajectory's events cut there.
+The column is `<feature>__<labels joined by " | ">`, and a node above the last level ends with ` | *`, since it stands for every path below it; `<feature>__*` holds the events whose first level is not frequent.
+`<feature>__count` is the number of events, and `<feature>__rare` the share of events cut above the last level.
+
+`traj tree` shows the tree of one paths feature:
+
+- per level, the number of nodes, the number of frequent nodes, and the bits the level adds to describing one event, which is the entropy of the events over the nodes of this level minus that of the level above;
+- the cut: the number of nodes used and the share of events cut at each depth;
+- the most used nodes of the cut, with support and events.
+
+With `--by`, every node also gets the share of the variation of its column across trajectories that the groups of that column explain, and every level the median over its nodes.
+With `--within`, the means of the `--within` groups are removed first, so `--by model --within case_id` tells how much models differ on the same case.
+A level where the share is high separates the groups at that level: with levels ordered from what is asked to how it is written, this tells apart groups that ask other questions from groups that write the same question another way.
 
 ## 7. Reports and feedback
 
@@ -459,6 +505,9 @@ The `traj-report` skill guides Codex or Claude Code through these steps:
 | `traj table [--dataset d] [--column c...]` | print the wide table as CSV |
 | `traj view [--host 127.0.0.1] [--port 8000]` | serve configurable feature analysis and a searchable feature table |
 | `traj sample [--sampler default] [--budget n]` | sample |
+| `traj tree <feature> [--dataset d] [--support s] [--by c] [--within c] [--top n]` | show a paths feature as a tree: the size of every level, where events are cut, and the most used nodes |
+| `traj evaluate [--workers n]` | measure noise, variation and dependence of every enabled feature, assign roles, and report drift of the trajectories outside the reference set |
+| `traj mine [--rounds n] [--workers n]` | propose, check and revise features from the trajectories, and write the accepted ones to `operators/mined/` and `traj.yaml` |
 
 Options that take several values repeat, such as `--group a --group b`.
 `operators enable` and `operators disable` validate the whole modified configuration before writing `traj.yaml`.
@@ -505,6 +554,209 @@ Adapters and operators meet only through the Trajectory.
 When project operators depend on conventions of an adapter, such as metadata keys or the `name` of special steps, those conventions are constants in the adapter file and appear in the dataset description.
 New files need no registration: `traj adapters list` and `traj operators list` find them, and a project file overrides a package file of the same name.
 
+## 10. Feature evaluation and mining
+
+A feature definition plays the part a test oracle plays in software testing: it states what to observe in one execution, and it has to be proposed, checked and maintained.
+`traj evaluate` judges every enabled feature by three quantities, and `traj mine` proposes new features from the trajectories and judges them the same way.
+Both read and write only trajectories, `FeatureSpec`, operators and the feature table, so they hold no knowledge of what a sampler or a report later does with a feature.
+
+### 10.1 Reference set and surprisal
+
+The enabled features together with a reference set form a statistical model of normal behaviour.
+The reference set R holds the trajectories of the datasets named in `reference.datasets`, without the keys in `reference.exclude`; every other trajectory is monitored.
+With `reference.datasets: all`, the default, every trajectory is in R and nothing is monitored.
+
+The surprisal of a trajectory `t` is the sum of one term per feature, so every unusual trajectory names the features that make it unusual.
+Each term compares the value of `t` with the `n` reference trajectories that have a value for the feature:
+
+| Columns of the wide table | Term |
+|---|---|
+| boolean; each label column of a set | `-ln((c + 1) / (n + 2))`, where `c` reference trajectories have the same value in the column |
+| category | `-ln((c + 1) / (n + L + 1))`, where `c` reference trajectories have the same label and `L` labels occur in R |
+| scalar; each column of a vector or a map | `-ln((c + 1) / (n + 1))`, where `c` reference trajectories lie at least as far from the reference median as `t` |
+| `<feature>__missing` | as a boolean column |
+
+A label that no reference trajectory has counts as a column of zeros in R, so a new label on a set or a map costs `ln(n + 2)` or `ln(n + 1)`.
+A feature with several columns contributes the sum of its columns.
+
+A paths feature contributes one term per level, named `<feature>@<level>`, in place of its node columns.
+An event at a node costs `-ln((c + 1) / (p + k + 1))` at the level of that node, where the reference events hold `c` under the node and `p` under its parent, which has `k` children there; below a node R does not hold, the levels cost nothing, so a new path is charged to the first level where it is new.
+A trajectory's value at a level is the mean of that cost over its events, and its term is `-ln((c + 1) / (n + 1))`, where `c` reference trajectories have a value at least as large.
+The terms tell at which level a trajectory is unusual: in what it asks, or only in how it writes it.
+A dependent feature (section 10.3) contributes its relation term in place of its own columns: with the predictor of section 10.2 fitted on R, `-ln((c + 1) / (n + 1))`, where `c` reference trajectories have an out-of-fold residual at least as large as the residual of `t`.
+
+A feature that has one value throughout R contributes almost nothing inside R, and about `ln(n)` for a monitored trajectory with another value.
+Having one value in `n` trajectories only bounds the share of other values below about `3 / n` at 95% confidence, so such a feature is kept as an invariant, and its violation is an anomaly that weighs more the larger R is.
+
+### 10.2 Three quantities
+
+| Quantity | Question | Computation |
+|---|---|---|
+| noise `ε` | does a second measurement give the same value? | LLM features: extract the evaluation set a second time with `evaluation.model`, and average the disagreement over the trajectories with status `ok` in both: 0 or 1 for boolean and category, the Jaccard distance for set, and 0 for two empty sets. Code features: 0, since they are deterministic. |
+| variation | how many values does the feature take? | the number of distinct values over R |
+| dependence `r(x→y)` | does feature x determine feature y? | variance-weighted R² of a decision tree that predicts the scaled distance columns of y from those of x, over 5 folds of the reference trajectories with values for both; 0 when fewer than 50 trajectories have both, or when y has one value among them |
+
+An LLM feature with numbers, which the built-in library does not have, disagrees by the mean absolute difference of its numbers, divided by the width of its `range`, or by the largest magnitude when it declares none, and capped at 1; vectors of different lengths disagree by 1.
+
+The evaluation set is `evaluation.size` reference trajectories drawn with `evaluation.seed`.
+`evaluation.model` must differ from the model of every LLM group, and `traj evaluate` stops with an error when it is unset or equal.
+The second measurement of a group runs through an aifn function of its own, `eval-<group>`, so the answers of the two models never share a cache entry.
+Second measurements are written to `.traj/evaluation/<group>.parquet` in the layout of the feature table.
+Noise bounds what a violation can show: a difference that measurement alone produces with probability `ε` carries at most `ln(1 / ε)` of evidence, and a feature produces about `N · ε` false violations over `N` monitored trajectories.
+
+A group extracted for a part of R is judged on that part: its second measurement takes the same draw among the reference trajectories it has rows for, and every quantity of its features counts only the trajectories with a value.
+`traj evaluate` stops with an error when an enabled group has rows for no reference trajectory.
+
+### 10.3 Roles
+
+Every enabled feature gets one role; the features that are not context are assigned in this order: code features before LLM features, then by ascending `ε`, then by name.
+
+| Role | Condition | In distances | In surprisal |
+|---|---|---|---|
+| invariant | one distinct value in R | left out of `features: distinguishing` | its own columns |
+| dependent | an earlier distinguishing feature e has `r(e→f) ≥ evaluation.dependence_min` | left out of `features: distinguishing` | the relation term of e→f |
+| distinguishing | otherwise | included | its own columns |
+| context | a feature of the `meta.fields` operator | left out of `features: distinguishing` | none |
+
+Context features are copied metadata, such as the model, the case or an evaluation result.
+They are conditions to group and compare by, in `traj tree --by`, in `relative_to` and in `where` conditions; they are not judged, they determine no other feature, and they add nothing to surprisal.
+A paths feature takes no part in dependence, since it has a column per node of its tree: it is invariant with one distinct value and distinguishing otherwise.
+
+A dependent feature stays extracted, and the relation e→f is recorded: two features that agree today can part later, and the trajectory where they part is an anomaly even when each value alone is common.
+Leaving invariant and dependent features out of the distances keeps one piece of information from counting twice, and leaves the sampler's feature weights to express importance.
+
+`.traj/evaluation/features.json` holds the evaluation set, the trajectories measured a second time per LLM group, and per feature `ε` with the number of trajectories compared, the number of reference trajectories with a value, the number of distinct values, the role, the relation, and the decision of section 10.4.
+When monitored trajectories exist, it also holds per feature the Jensen-Shannon divergence between its distribution in R and in the monitored trajectories, with numeric columns binned at the deciles of R.
+
+### 10.4 Decisions
+
+| Condition | Decision |
+|---|---|
+| `ε > evaluation.noise_max` | revise once; remove when the revised feature is still above the limit |
+| a set or category feature without `labels` has more than `evaluation.label_limit` distinct labels in R | revise into a closed set of `labels`; the feature stays as it is when the revision is not accepted |
+| a candidate does not reproduce the value of one of its examples | an LLM candidate is revised once and rejected when the revised candidate still does not; a code candidate is rejected |
+| a candidate has one distinct value over the trajectories it was extracted from and its examples together | reject: a definition never seen to take a second value cannot be told from one that always returns the same value |
+| a candidate has no value that both models measured | reject |
+| a candidate passes the rows above | add, with the role of section 10.3 |
+| two candidates, or a candidate and an enabled feature, ask the same question | merge into one definition, in `mine-consolidate` |
+| the mined LLM features number more than `mining.capacity` | remove those with the highest `ε` first, then by name |
+
+Noise is the only reason to remove a feature for its quality: a feature without variation is an invariant, and a feature that another determines is a recorded relation.
+`traj evaluate` reports decisions and changes nothing.
+`traj mine` applies them to candidates and to mined features, which are the `llm.features` instance named `mined` and the files in `operators/mined/`.
+
+### 10.5 Mining round
+
+`traj mine` runs rounds until a round adds no feature or `--rounds`, 1 by default, is reached, and then runs `traj evaluate` once more when the last round changed the enabled features.
+It stops with an error when `evaluation.model` is unset, because every candidate is measured by two models.
+A deterministic driver chooses the material, computes the quantities, decides and writes files; the reading and writing steps are aifn functions.
+A round whose directory has no `report.json` is run again under the same number: it chooses the same material, so its calls are answered from the conclusions already in the mailbox.
+
+| Step | What it does | Without it |
+|---|---|---|
+| 1. evaluate | runs `traj evaluate` | no roles for choosing pairs, and no feature list for the proposer |
+| 2. choose material | `mining.singles` random reference trajectories, and the `mining.pairs` closest pairs of reference trajectories in the distances of `features: distinguishing`, each trajectory in at most one pair; none of them from the evaluation set or from a second measurement | candidates would be judged on the trajectories they came from |
+| 3. `mine-propose` | one call per single or pair: reads the files and the enabled feature definitions, and returns at most five distinctions no enabled feature expresses | no source of candidates |
+| 4. `mine-consolidate` | one call per round: merges proposals that ask the same question, drops those an enabled feature already asks, and keeps at most `mining.candidates` | each reading is independent, so one candidate arrives in many wordings and the trial extraction grows with them |
+| 5. `mine-implement` | one call per candidate that reads structured fields: writes a code operator file | questions that fields answer would cost one model call per trajectory |
+| 6. trial extraction | LLM candidates form the group `mined-trial`, defined by `.traj/mining/trial.json` while the extraction runs; it is extracted on the evaluation set and the example trajectories with the engine model and on the evaluation set with `evaluation.model`; code candidates are computed on R and their example trajectories | the quantities cannot be computed |
+| 7. decide | section 10.4 | no ground for adding, merging or removing |
+| 8. `mine-revise` | one call per feature to revise: reads the disagreeing trajectories and returns a rewritten definition, several simpler definitions, a closed label set, or a drop with its reason; the result goes through steps 6 and 7 once | a noisy candidate could only be dropped, and the next round would propose it again |
+| 9. apply | writes `operators/mined/` and `traj.yaml`, runs `traj extract` for the groups that gained a feature, writes `.traj/mining/<round>/report.json` and prints it | |
+
+The mined features of a project that `traj evaluate` sends to revision enter step 8 together with the candidates.
+A removed feature needs no extraction: its column stays in the table file and is no longer read.
+
+Single trajectories are the only material when no feature is distinguishing, and they do not depend on the enabled features.
+A close pair is the same under the enabled features, so the difference a reader states is what those features cannot express, as a surviving mutant shows what a test suite cannot detect.
+The pair also gives each candidate two examples with different values.
+
+Atomicity has no step of its own: a question that needs reasoning across many steps gets different values from two measurements, so its `ε` sends it to `mine-revise`.
+
+The aifn functions:
+
+| Function | Request | Returns | Workspace |
+|---|---|---|---|
+| `mine-propose` | one or two files `<dataset>/<id>.md` with their `sha256`, and the model | proposals | `.traj/datasets/`, read-only |
+| `mine-consolidate` | `proposals.json`, `features.json`, and the model | candidates | `.traj/mining/<round>/`, read-only |
+| `mine-implement` | the candidate and the JSON files of its example trajectories | `source`, the text of an operator file | `.traj/mining/<round>/implement/<name>/`, read-only, which also holds `schema.py`, `base.py` and a library operator as `example_operator.py` |
+| `mine-revise` | the definition, up to `mining.revise_cases` cases with both values and their evidence, and the model | one of `rewrite`, `split`, `labels`, `drop` | `.traj/datasets/`, read-only |
+
+A proposal and a candidate hold the same fields:
+
+| Field | Meaning |
+|---|---|
+| `spec` | a `FeatureSpec` of type boolean, category or set for `reads: text`, and of any type for `reads: fields` |
+| `reads` | `fields` when structured fields answer the question, `text` when it needs reading what someone wrote |
+| `guidance` | judging criteria, for `reads: text` |
+| `examples` | trajectory key, cited steps, and the value the feature has there |
+
+The output models embed `FeatureSpec` and check every example value against the feature type, so aifn returns an invalid name, shape or value to the agent for correction.
+An example counts only when its file was read in this round, and a candidate left without examples is rejected.
+A candidate whose name an enabled feature already has is rejected, and the report names it.
+The driver loads the file `mine-implement` returns, requires a code operator whose outputs equal the candidate's `spec`, and computes it on the examples and on R through the type check of section 5.5; any error rejects the candidate, and the report holds the error.
+The instructions of `mine-propose` and `mine-revise` carry the rules for atomic features of the `traj-features` skill.
+
+### 10.6 Monitoring
+
+Trajectories ingested into a dataset outside `reference.datasets` are monitored.
+The `surprise` strategy brings the monitored trajectories with the highest surprisal to a reader, each with the features and relations that set it apart, and `traj evaluate` reports per feature how far the monitored distribution has moved.
+When a reader finds the change expected, the dataset is added to `reference.datasets`, and an invariant that now takes two values becomes a distinguishing feature at the next `traj evaluate`.
+Trajectories found to be faulty go into `reference.exclude`, so they do not become part of normal behaviour.
+Both changes are edits of `traj.yaml` and are committed like any other configuration change.
+
+### 10.7 Configuration
+
+| Field | Default | Meaning |
+|---|---|---|
+| `reference.datasets` | `all` | datasets whose trajectories form R, or `all` |
+| `reference.exclude` | `[]` | trajectory keys left out of R |
+| `evaluation.size` | 100 | trajectories in the evaluation set |
+| `evaluation.seed` | 0 | seed of the evaluation set |
+| `evaluation.model` | none | model of the second measurement |
+| `evaluation.noise_max` | 0.1 | highest accepted `ε` |
+| `evaluation.dependence_min` | 0.9 | lowest `r` that makes a feature dependent |
+| `evaluation.label_limit` | 100 | most distinct labels of a set or category feature without `labels`, equal to the number of label columns the wide table keeps |
+| `mining.singles` | 20 | single trajectories read per round |
+| `mining.pairs` | 20 | pairs read per round |
+| `mining.candidates` | 15 | most candidates a round carries into the trial extraction |
+| `mining.capacity` | 30 | most mined LLM features |
+| `mining.revise_cases` | 10 | most cases shown to `mine-revise` |
+| `mining.model` | `engine.model` | model of the `mine-*` functions |
+| `mining.timeout_s` | 1800 | time limit of one `mine-*` call |
+
+### 10.8 Limits
+
+- `ε` shows only differences between two models; an error both models make stays unseen.
+- Dependence compares pairs of features, so a feature that several others determine together counts as distinguishing.
+- The ability of an invariant to detect a change cannot be measured on data where it never changes.
+- Problems already present in R count as normal behaviour.
+- The three quantities show that a feature is reliable and what part it plays; how much it matters to an analysis is expressed downstream, in a sampler's feature weights.
+- A code operator written by `mine-implement` runs in the project's environment without isolation.
+
+## 11. SQL component
+
+`traj_analyzer.sql` is a self-contained package that parses SQL text with sqlglot and describes what a query asks.
+It only parses: it knows no tool, no trajectory and no feature type, and it imports nothing else of this repository.
+A project's operators import it and add what belongs to the project: which tool call holds SQL, which dialect the queries use, how table names map to data sources, and what the results mean.
+
+| Module | Provides |
+|---|---|
+| `parsing` | `parse(sql, dialect)`, the syntax tree or None when the text does not parse; `tables(tree)`, the table names and the file paths inside table functions; `resolve(tree, dialect)`, the tree with GROUP BY and ORDER BY ordinals replaced by what they stand for |
+| `atoms` | `atoms(tree)`, `<role>:<column>` for every data column, with the roles filter, group, order, join, show and the aggregates count, avg, sum, min, max, quantile and stddev; `filter_values(tree, skip)`, `<column> <op> <value>` for string values compared with a column, leaving out the columns in `skip` |
+| `shape` | `shape(tree, skip)`, the facets of a query as sorted tuples: `tables`, `scope` (filter, group and join atoms), `measures` (columns inside aggregates), `aggregates`, `shown` (show and order atoms) and `values` |
+| `canonical` | `literal_template(tree, dialect, name_table)`, the query as written with literals as placeholders; `Canonical(tree, name_table)`, the form of a resolved query without the names its author chose and without the order of commutative parts |
+
+The facets of `shape` run from what a query asks to how it is written, so a project joins them, in that order, into the levels of a paths feature (section 6.3).
+Names a query defines itself, as aliases or CTEs, are not data columns, and a GROUP BY or ORDER BY key written as an ordinal or an alias counts as the select-list expression it stands for.
+
+Two queries with the same `Canonical.text` ask the same thing: aliases are replaced by what they stand for, CTEs are written where they are read, and the operands of AND, OR, = and +, the select list, the joins and the GROUP BY keys are sorted.
+`Canonical.parts` holds the text of every condition, function call, join, sort key and table read, for comparing queries by the parts they share.
+`name_table` turns a table name or file path into the label the forms use, so a project decides which tables count as the same source.
+
+No table schema is known to the component: `SELECT *` is not expanded, and a column keeps no table, so columns of the same name in two tables, and the two sides of a self-join, are not told apart.
+`parse` returns None for text sqlglot rejects, and `resolve` raises what sqlglot raises on the few parsed queries it cannot resolve; the caller records both.
+
 ## Appendix
 
 ### A. What chunks are for
@@ -534,3 +786,6 @@ Tests use real data: samples of the public UltraChat and Toucan datasets, and a 
 The session fragment leaves out `attachment` records, which hold the user's environment details.
 `tests/data/replay/` holds aifn event records and submissions of real model runs on three Toucan trajectories, named by the content hash of the rendered file.
 The outputs of `tests/data/operators/fixture/outcome.py` match those records, and tests replay them through aifn's `ReplayEngine`, covering the whole path from submitting tasks through worker execution and output validation to the feature table.
+`tests/data/mining/` holds the first 6 Toucan and 8 UltraChat conversations of those samples, and `replay/` the accepted submission of every call of one real mining round on them: 46 calls to `mine-propose`, `mine-consolidate`, `mine-revise`, the trial extractions, the extraction of the accepted features and their second measurement.
+A recording is named by the hash of the call's function, request and instruction, and its event file is empty, since the worker reads only the submission.
+The test replays the whole round, including a candidate that was revised for noise and rejected again.

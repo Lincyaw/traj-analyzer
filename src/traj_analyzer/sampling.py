@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 
+from traj_analyzer.evaluation import Evaluation, surprisal
 from traj_analyzer.files import read_yaml
 from traj_analyzer.operators.catalog import Group
 from traj_analyzer.project import ConfigError, Project
@@ -26,7 +28,7 @@ EXPLAINED_COLUMNS = 5
 class StrategySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["target", "outlier", "diversity", "random"]
+    kind: Literal["target", "outlier", "diversity", "random", "surprise"]
     quota: float | int | Literal["rest"]
     label: str | None = None
     where: str | None = None
@@ -48,7 +50,8 @@ class SamplerSpec(BaseModel):
     budget: int = Field(ge=1)
     seed: int = 0
     datasets: list[str] | None = None
-    features: Literal["all"] | list[str] | dict[str, float] = "all"
+    features: Literal["all", "distinguishing"] | list[str] | dict[str, float] = "all"
+    """`distinguishing` takes the features `traj evaluate` gave that role."""
     population: Literal["complete", "all"] = "complete"
     """`complete` samples only trajectories with a feature-table row for every sampler feature."""
     strategies: list[StrategySpec] = Field(min_length=1)
@@ -80,17 +83,34 @@ def load_sampler(project: Project, name: str) -> SamplerSpec:
     return SamplerSpec.model_validate(read_yaml(project.samplers_dir / f"{name}.yaml"))
 
 
-def weights_for(spec: SamplerSpec, frame: Frame) -> dict[str, float]:
+@dataclass(frozen=True)
+class Reference:
+    """What sampling needs of the reference set: its keys and the result of `traj evaluate`."""
+
+    keys: list[str]
+    evaluation: Evaluation
+
+
+def needs_reference(spec: SamplerSpec) -> bool:
+    return spec.features == "distinguishing" or any(s.kind == "surprise" for s in spec.strategies)
+
+
+def weights_for(spec: SamplerSpec, frame: Frame, reference: Reference | None = None) -> dict[str, float]:
     if spec.features == "all":
         return dict.fromkeys(frame.columns, 1.0)
+    if spec.features == "distinguishing":
+        if reference is None:
+            raise ConfigError("features: distinguishing needs the result of `traj evaluate`")
+        roles = reference.evaluation.roles()
+        return {feature: 1.0 for feature in frame.columns if roles.get(feature) == "distinguishing"}
     if isinstance(spec.features, list):
         return dict.fromkeys(spec.features, 1.0)
     return dict(spec.features)
 
 
-def sample(spec: SamplerSpec, frame: Frame, groups: list[Group]) -> Sampling:
+def sample(spec: SamplerSpec, frame: Frame, groups: list[Group], reference: Reference | None = None) -> Sampling:
     """Run the strategies in order; each one takes its quota from what earlier ones left."""
-    weights = weights_for(spec, frame)
+    weights = weights_for(spec, frame, reference)
     if spec.population == "complete":
         frame = frame.complete([feature for feature, weight in weights.items() if weight])
     rng = np.random.default_rng(spec.seed)
@@ -108,8 +128,11 @@ def sample(spec: SamplerSpec, frame: Frame, groups: list[Group]) -> Sampling:
         if strategy.kind == "target":
             matched = _matches(strategy, label, frame.query, thresholds)
         free = [i for i, k in enumerate(keys) if k not in chosen]
-        new, unscored = ([], None) if quota == 0 else _run(strategy, label, quota, free, keys, m, frame.query,
-                                                           matched, rng, spec.seed)
+        if strategy.kind == "surprise":
+            new, unscored = _surprising(label, quota, free, keys, frame, reference), None
+        else:
+            new, unscored = ([], None) if quota == 0 else _run(strategy, label, quota, free, keys, m, frame.query,
+                                                               matched, rng, spec.seed)
         chosen.update(pick.key for pick in new)
         picks += new
         left -= len(new)
@@ -240,6 +263,40 @@ def _outliers(
         "score": round(float(score[i]), 4), "rank": ranks[i], "of": len(ranks), **details.get(i, {}),
     }) for i in ranked]
     return picks, None if strategy.relative_to is None else len(keys) - len(ranks)
+
+
+def _surprising(
+    label: str, quota: int, free: list[int], keys: list[str], frame: Frame, reference: Reference | None
+) -> list[Pick]:
+    """Rank the trajectories outside the reference set by their surprisal under it and take the highest.
+
+    Each pick names the terms with the highest surprisal, with the value and how many reference trajectories
+    share it.
+    """
+    if reference is None:
+        raise ConfigError(f"{label}: a surprise strategy needs the result of `traj evaluate`")
+    inside = set(reference.keys)
+    monitored = [i for i in range(len(keys)) if keys[i] not in inside]
+    if not monitored:
+        raise ConfigError(f"{label}: every trajectory is in the reference set, so none can be ranked")
+    relations = {feature: source for feature, source in reference.evaluation.relations().items()
+                 if feature in frame.columns}
+    scores = surprisal(frame, reference.keys, relations, reference.evaluation.context())
+    total = scores.total().to_numpy()
+    ranks = {i: rank + 1 for rank, i in enumerate(sorted(monitored, key=lambda i: -total[i]))}
+    picks = []
+    for i in sorted((i for i in free if i in ranks), key=lambda i: ranks[i])[:quota]:
+        row = scores.terms.iloc[i]
+        columns = [{"column": name, "surprisal": round(float(row[name]), 3),
+                    "value": _number(scores.values.iloc[i][name]), "shared": _number(scores.shared.iloc[i][name])}
+                   for name in row.sort_values(ascending=False).index[:EXPLAINED_COLUMNS]]
+        picks.append(Pick(key=keys[i], strategy=label, reason={
+            "surprisal": round(float(total[i]), 3), "rank": ranks[i], "of": len(ranks), "columns": columns}))
+    return picks
+
+
+def _number(value: float) -> float | None:
+    return None if np.isnan(value) else round(float(value), 4)
 
 
 _THRESHOLD = re.compile(r"\{(\w+)\.(\w+)\}")

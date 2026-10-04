@@ -7,16 +7,25 @@ from typing import Any
 from aifn import AiFunction, Mailbox, Model, Policy, Registry, Worker
 from aifn.engines import DeepSeekEngine
 
+from traj_analyzer import proposals
 from traj_analyzer.features.spec import ExtractRequest, output_model, write_instruction
-from traj_analyzer.operators.catalog import Group, load_groups
+from traj_analyzer.operators.catalog import Group, runtime_groups
 from traj_analyzer.project import ConfigError, Project
 
 
-def model_name(project: Project, group: Group) -> str:
-    return group.model or project.config.engine.model
+def model_name(project: Project, group: Group, second: bool = False) -> str:
+    """The model that answers the group, or with `second` the model of the second measurement."""
+    if not second:
+        return group.model or project.config.engine.model
+    model = project.config.evaluation.model
+    if model is None:
+        raise ConfigError("evaluation.model is not set; the second measurement needs a model of its own")
+    return model
 
 
-def build_function(project: Project, group: Group, instruction: Path | None = None) -> AiFunction[Any, Any]:
+def build_function(
+    project: Project, group: Group, instruction: Path | None = None, second: bool = False
+) -> AiFunction[Any, Any]:
     """Declare the group's aifn function; the submitting side passes the instruction file it wrote.
 
     Workers need no instruction file, because each call carries a copy of its instruction text.
@@ -24,11 +33,11 @@ def build_function(project: Project, group: Group, instruction: Path | None = No
     engine = project.config.engine
     extract = project.config.extract
     return AiFunction(
-        name=group.function_name,
+        name=f"eval-{group.name}" if second else group.function_name,
         request=ExtractRequest,
         returns=output_model(group),
         model=Model(
-            name=model_name(project, group), provider=engine.provider,
+            name=model_name(project, group, second), provider=engine.provider,
             max_tokens=engine.max_tokens, reasoning_effort=engine.reasoning_effort,
         ),
         instruction=instruction,
@@ -37,8 +46,8 @@ def build_function(project: Project, group: Group, instruction: Path | None = No
     )
 
 
-def submitting_function(project: Project, group: Group) -> AiFunction[Any, Any]:
-    return build_function(project, group, write_instruction(project, group))
+def submitting_function(project: Project, group: Group, second: bool = False) -> AiFunction[Any, Any]:
+    return build_function(project, group, write_instruction(project, group), second)
 
 
 def mailbox(project: Project) -> Mailbox:
@@ -46,10 +55,15 @@ def mailbox(project: Project) -> Mailbox:
 
 
 def registry(project: Project) -> Registry:
-    return Registry(functions={
-        group.function_name: build_function(project, group)
-        for group in load_groups(project) if not group.is_code
-    })
+    functions = dict(proposals.functions(project))
+    for group in runtime_groups(project):
+        if group.is_code:
+            continue
+        functions[group.function_name] = build_function(project, group)
+        if project.config.evaluation.model is not None:
+            second = build_function(project, group, second=True)
+            functions[second.name] = second
+    return Registry(functions=functions)
 
 
 def policy(project: Project) -> Policy:

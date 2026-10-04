@@ -56,6 +56,39 @@ class ExtractConfig(_Strict):
 
 class SamplingConfig(_Strict):
     vector_length: int = Field(default=10, ge=2)
+    path_support: float = Field(default=0.01, gt=0, le=1)
+    """Share of trajectories that must reach a node of a paths feature for the node to get a column."""
+
+
+class ReferenceConfig(_Strict):
+    datasets: Literal["all"] | list[str] = "all"
+    """Datasets whose trajectories are the reference set; every other trajectory is monitored."""
+    exclude: list[str] = Field(default_factory=list)
+    """Trajectory keys left out of the reference set."""
+
+
+class EvaluationConfig(_Strict):
+    size: int = Field(default=100, ge=1)
+    """Reference trajectories measured a second time."""
+    seed: int = 0
+    model: str | None = None
+    """Model of the second measurement; it must differ from the model of every LLM group."""
+    noise_max: float = Field(default=0.1, ge=0, le=1)
+    dependence_min: float = Field(default=0.9, ge=0, le=1)
+    label_limit: int = Field(default=100, ge=1)
+
+
+class MiningConfig(_Strict):
+    singles: int = Field(default=20, ge=0)
+    pairs: int = Field(default=20, ge=0)
+    candidates: int = Field(default=15, ge=1)
+    """Most candidates one round carries into the trial extraction."""
+    capacity: int = Field(default=30, ge=1)
+    """Most mined LLM features."""
+    revise_cases: int = Field(default=10, ge=1)
+    model: str | None = None
+    """Model of the mine-* functions; defaults to engine.model."""
+    timeout_s: float = Field(default=1800.0, gt=0)
 
 
 class OperatorUse(_Strict):
@@ -84,6 +117,9 @@ class Config(_Strict):
     engine: EngineConfig = Field(default_factory=EngineConfig)
     extract: ExtractConfig = Field(default_factory=ExtractConfig)
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
+    reference: ReferenceConfig = Field(default_factory=ReferenceConfig)
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+    mining: MiningConfig = Field(default_factory=MiningConfig)
 
 
 class Project:
@@ -143,3 +179,16 @@ class Project:
     @property
     def samples_dir(self) -> Path:
         return self.data_dir / "samples"
+
+    @property
+    def evaluation_dir(self) -> Path:
+        return self.data_dir / "evaluation"
+
+    @property
+    def mining_dir(self) -> Path:
+        return self.data_dir / "mining"
+
+    @property
+    def trial_path(self) -> Path:
+        """Definitions of the LLM candidates under trial, in the parameters of the `llm.features` operator."""
+        return self.mining_dir / "trial.json"

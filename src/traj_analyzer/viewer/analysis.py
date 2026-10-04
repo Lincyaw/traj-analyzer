@@ -59,6 +59,11 @@ def analysis_query(database: Database, request: AnalysisRequest) -> tuple[str, l
             join = f" CROSS JOIN UNNEST(map_entries({feature})) AS expanded(item)"
             select += ["item.key AS __label", "item.value AS __value"]
             types.update(__label="VARCHAR", __value="DOUBLE")
+        elif dtype == "VARCHAR[][]":
+            # A paths feature: one label record per event, its levels joined as in the wide table.
+            join = f" CROSS JOIN UNNEST({feature}) AS expanded(item)"
+            select += ["array_to_string(item, ' | ') AS __label", "1.0 AS __value"]
+            types.update(__label="VARCHAR", __value="DOUBLE")
         elif dtype == "VARCHAR[]":
             join = f" CROSS JOIN UNNEST({feature}) AS expanded(item)"
             select += ["item AS __label", "1.0 AS __value"]

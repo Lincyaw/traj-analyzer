@@ -28,6 +28,8 @@ traj extract --group dialogue --limit 5
 traj table > .traj/table.csv
 traj view
 traj sample
+traj evaluate
+traj mine
 ```
 
 The `traj.yaml` created by `traj init` enables every general operator of the built-in library, and the seven LLM operators share the `dialogue` call group.
@@ -38,6 +40,10 @@ This repository provides two shared skills for Codex and Claude Code: `traj-feat
 Both agents read the same skill files, including any later project edits or supporting resources.
 The tool repository uses the same directory arrangement; maintain skill content in `.claude/skills/`.
 Launch either agent in the analysis project to define features or write reports.
+
+`traj evaluate` measures every enabled feature for noise, variation and dependence and gives it a role: distinguishing, invariant or dependent.
+`traj mine` proposes new features by having a model read trajectories, checks each candidate the same way, and enables the accepted ones.
+Both need `evaluation.model` in `traj.yaml`, a second model that measures LLM features again; the "Feature evaluation and mining" section of the design describes them.
 
 `traj view` serves an interactive analysis page at http://127.0.0.1:8000.
 Select features and grouping columns, then configure charts, aggregates, filters, expressions and multiple panels in the embedded Perspective viewer.

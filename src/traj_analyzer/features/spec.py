@@ -39,6 +39,9 @@ def value_type(feature: FeatureSpec) -> Any:
             return Annotated[list[number], Field(min_length=1)]
         case "map":
             return dict[label, number]
+        case "paths":
+            depth = len(feature.levels or ())
+            return list[Annotated[list[str], Field(min_length=depth, max_length=depth)]]
     raise AssertionError(feature.type)
 
 

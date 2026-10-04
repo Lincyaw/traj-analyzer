@@ -10,15 +10,17 @@ from typing import Annotated, Any
 import typer
 import uvicorn
 from pydantic import ValidationError
-from ruamel.yaml import YAML
 
 from traj_analyzer.adapters import discover_adapters
+from traj_analyzer.evaluation import evaluate, load_evaluation, reference_keys
 from traj_analyzer.extract import coverage, extract
 from traj_analyzer.files import parse_yaml
 from traj_analyzer.ingest import ingest, load_index
-from traj_analyzer.operators.catalog import discover, load_groups
-from traj_analyzer.project import CONFIG_FILE, Config, ConfigError, Project
-from traj_analyzer.sampling import enrich, load_sampler, sample, save
+from traj_analyzer.mining import mine
+from traj_analyzer.operators.catalog import discover, edit_operators, load_groups
+from traj_analyzer.paths import PathTree, describe
+from traj_analyzer.project import ConfigError, Project
+from traj_analyzer.sampling import Reference, enrich, load_sampler, needs_reference, sample, save
 from traj_analyzer.scaffold import InitError, init_project
 from traj_analyzer.vectorize import Frame, build_frame
 from traj_analyzer.viewer.server import create_app
@@ -125,22 +127,9 @@ def cmd_operators_show(name: str) -> None:
 
 
 def _edit_operators(project: Project, change: Any) -> list[dict[str, Any]]:
-    """Apply `change` to the operators list of traj.yaml, validate the result, then write it back."""
-    path = project.root / CONFIG_FILE
-    editor = YAML()
-    editor.preserve_quotes = True
-    editor.width = 4096
-    editor.indent(mapping=2, sequence=4, offset=2)
-    editor.representer.add_representer(
-        type(None), lambda representer, _: representer.represent_scalar("tag:yaml.org,2002:null", "null"))
-    document = editor.load(path)
-    if "operators" not in document:
-        document["operators"] = []
-    change(document["operators"])
-    config = Config.model_validate(json.loads(json.dumps(document)))
-    load_groups(Project(project.root, config))
-    editor.dump(document, path)
-    return [use.model_dump(by_alias=True, exclude_none=True) for use in config.operators]
+    """Apply `change` to the operators list of traj.yaml and return the list as written."""
+    edited = edit_operators(project, change)
+    return [use.model_dump(by_alias=True, exclude_none=True) for use in edited.config.operators]
 
 
 @operators_app.command("enable")
@@ -229,7 +218,10 @@ def cmd_sample(sampler: Annotated[str, typer.Option(help="Sampler name under sam
     if budget:
         spec = spec.model_copy(update={"budget": budget})
     frame = _frame(project, spec.datasets)
-    result = sample(spec, frame, load_groups(project))
+    reference = None
+    if needs_reference(spec):
+        reference = Reference(keys=reference_keys(project, load_index(project)), evaluation=load_evaluation(project))
+    result = sample(spec, frame, load_groups(project), reference)
     selection = {
         "population": result.population,
         "strategies": [report.model_dump() for report in result.strategies],
@@ -237,6 +229,49 @@ def cmd_sample(sampler: Annotated[str, typer.Option(help="Sampler name under sam
     }
     path = save(project, spec, selection)
     _emit({"selection": str(path), **selection})
+
+
+@app.command("tree")
+def cmd_tree(
+    feature: Annotated[str, typer.Argument(help="A paths feature.")],
+    dataset: Datasets = None,
+    support: Annotated[float | None, typer.Option(help="Share of trajectories a node needs; default from "
+                                                       "sampling.path_support.")] = None,
+    by: Annotated[str | None, typer.Option(help="Column whose groups are compared at every node.")] = None,
+    within: Annotated[str | None, typer.Option(help="Column held fixed while comparing --by.")] = None,
+    top: Annotated[int, typer.Option(min=1, help="Nodes to print, most used first.")] = 40,
+) -> None:
+    """Show a paths feature as a tree: the size of every level, where events are cut, and the most used nodes."""
+    project = Project.find()
+    frame = _frame(project, dataset)
+    if feature not in frame.paths:
+        raise ConfigError(f"{feature} is not a paths feature with extracted values")
+    unknown = sorted({c for c in (by, within) if c} - set(frame.query.columns))
+    if unknown:
+        raise ConfigError(f"Unknown columns: {unknown}")
+    if within and not by:
+        raise ConfigError("--within needs --by")
+    values = frame.paths[feature]
+    tree = PathTree.build(frame.levels[feature], values, support or project.config.sampling.path_support)
+    _emit({"feature": feature, **describe(tree, values, frame.query[by] if by else None,
+                                          frame.query[within] if within else None, top)})
+
+
+Workers = Annotated[int | None, typer.Option(help="Worker processes for LLM calls.")]
+
+
+@app.command("evaluate")
+def cmd_evaluate(workers: Workers = None) -> None:
+    """Measure noise, variation and dependence of every enabled feature, and assign each its role."""
+    _emit(evaluate(Project.find(), workers=workers).model_dump(mode="json"))
+
+
+@app.command("mine")
+def cmd_mine(rounds: Annotated[int, typer.Option(min=1, help="At most this many rounds.")] = 1,
+             workers: Workers = None) -> None:
+    """Propose features from the trajectories, check them, and enable the accepted ones."""
+    reports = mine(Project.find(), rounds=rounds, workers=workers)
+    _emit({"rounds": [report.model_dump(mode="json") for report in reports]})
 
 
 @app.command("view")

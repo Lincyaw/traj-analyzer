@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import pyarrow as pa
@@ -23,6 +24,7 @@ _ARROW = {
     "set": pa.list_(pa.string()),
     "vector": pa.list_(pa.float64()),
     "map": pa.map_(pa.string(), pa.float64()),
+    "paths": pa.list_(pa.list_(pa.string())),
 }
 
 
@@ -58,8 +60,11 @@ def schema(group: Group) -> pa.Schema:
                                                      for f in _fields(feature, group.evidence))])
 
 
-def write_group(project: Project, group: Group, rows: Iterable[FeatureRow]) -> None:
-    """Replace this group's rows for the keys present in `rows` and keep rows for other keys."""
+def write_group(project: Project, group: Group, rows: Iterable[FeatureRow], directory: Path | None = None) -> None:
+    """Replace this group's rows for the keys present in `rows` and keep rows for other keys.
+
+    `directory` holds the table, the feature table of the project by default.
+    """
     records: dict[str, dict[str, Any]] = {}
     for row in rows:
         record = records.setdefault(row.key, {KEY: row.key})
@@ -68,19 +73,19 @@ def write_group(project: Project, group: Group, rows: Iterable[FeatureRow]) -> N
         record[f"{row.feature}__detail"] = row.detail
         record[f"{row.feature}__evidence"] = row.evidence
     table = pa.Table.from_pylist(list(records.values()), schema=schema(group))
-    old = read_group(project, group)
+    old = read_group(project, group, directory)
     kept = old.filter(pc.invert(pc.is_in(old[KEY], value_set=table[KEY])))
-    path = project.table_dir / f"{group.name}.parquet"
+    path = (directory or project.table_dir) / f"{group.name}.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.concat_tables([kept, table]), path)
 
 
-def read_group(project: Project, group: Group) -> pa.Table:
+def read_group(project: Project, group: Group, directory: Path | None = None) -> pa.Table:
     """The group's table in the schema of its current features.
 
     A feature the file lacks, or holds with another value type, reads as null for every trajectory.
     """
-    path = project.table_dir / f"{group.name}.parquet"
+    path = (directory or project.table_dir) / f"{group.name}.parquet"
     target = schema(group)
     if not path.is_file():
         return target.empty_table()

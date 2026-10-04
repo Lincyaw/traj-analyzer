@@ -14,12 +14,13 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
-from aifn import Call, Handle, Mailbox, Refused, Returned, Workspace
+from aifn import AiFunction, Call, Handle, Mailbox, Refused, Returned, Workspace
+from pydantic import BaseModel
 
 from traj_analyzer.features.spec import ExtractRequest, value_validator
 from traj_analyzer.features.table import KEY, FeatureRow, read_group, status_column, write_group
 from traj_analyzer.ingest import IndexRow, load_index, load_trajectory
-from traj_analyzer.operators.catalog import Group, Instance, load_groups
+from traj_analyzer.operators.catalog import Group, Instance, load_groups, runtime_groups
 from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.runtime import engine_env, mailbox, model_name, submitting_function
 
@@ -90,23 +91,41 @@ def extract(
     Code features are recomputed on every run. LLM calls whose request and instruction are unchanged are answered
     from the aifn mailbox, so a rerun only calls the model for new or changed trajectories and operators.
     """
-    runner = runner or SubprocessWorkers()
     rows = select_rows(project, datasets, keys, limit)
-    selected = load_groups(project, groups)
+    return run_groups(project, load_groups(project, groups), rows, workers=workers, dry_run=dry_run, runner=runner)
+
+
+def run_groups(
+    project: Project,
+    selected: list[Group],
+    rows: list[IndexRow],
+    *,
+    workers: int | None = None,
+    dry_run: bool = False,
+    runner: WorkerRunner | None = None,
+    second: bool = False,
+    directory: Path | None = None,
+) -> list[GroupReport]:
+    """Run these groups on these trajectories and write their tables to `directory`, the feature table by default.
+
+    With `second`, LLM groups are measured by `evaluation.model` through functions of their own, so the answers
+    of the two models never share a cache entry.
+    """
+    runner = runner or SubprocessWorkers()
     code = [g for g in selected if g.is_code]
     llm = [g for g in selected if not g.is_code]
     if llm and not dry_run:
         runner.check(project)
-    code_reports, applies = _scan(project, code, llm, rows, dry_run)
+    code_reports, applies = _scan(project, code, llm, rows, dry_run, directory)
     if not llm:
         return code_reports
     box = mailbox(project)
-    known = _known_calls(box)
+    known = known_calls(box)
     issued: dict[str, list[tuple[Handle[Any], IndexRow]]] = {}
     reports: dict[str, GroupReport] = {}
     for group in llm:
         callable_rows = [row for row in rows if any(applies[group.name][row.key].values())]
-        issued[group.name] = _issue(project, box, known, group, callable_rows, dry_run)
+        issued[group.name] = _issue(project, box, known, group, callable_rows, dry_run, second)
         cached = sum(handle.poll() is not None for handle, _ in issued[group.name])
         reports[group.name] = GroupReport(group.name, total=len(rows), cached=cached,
                                           not_applicable=len(rows) - len(callable_rows))
@@ -116,7 +135,7 @@ def extract(
         handles = {row.key: handle for handle, row in issued[group.name]}
         out = _collect(group, rows, handles, applies[group.name], reports[group.name])
         if not dry_run:
-            write_group(project, group, out)
+            write_group(project, group, out, directory)
     return [*code_reports, *reports.values()]
 
 
@@ -139,7 +158,8 @@ def coverage(project: Project) -> dict[str, dict[str, int]]:
 
 
 def _scan(
-    project: Project, code: list[Group], llm: list[Group], rows: list[IndexRow], dry_run: bool
+    project: Project, code: list[Group], llm: list[Group], rows: list[IndexRow], dry_run: bool,
+    directory: Path | None = None,
 ) -> tuple[list[GroupReport], dict[str, dict[str, dict[str, bool]]]]:
     """Load each trajectory once to compute every code group and decide which LLM operators apply to it."""
     reports = {g.name: GroupReport(g.name, total=len(rows)) for g in code}
@@ -156,7 +176,7 @@ def _scan(
         if dry_run:
             reports[group.name].pending = len(rows)
         else:
-            write_group(project, group, out[group.name])
+            write_group(project, group, out[group.name], directory)
     return list(reports.values()), applies
 
 
@@ -193,7 +213,7 @@ _SCAN: dict[str, Any] = {}
 
 def _start_scan(root: str, code: list[str], llm: list[str], dry_run: bool) -> None:
     project = Project.load(Path(root))
-    groups = {g.name: g for g in load_groups(project)}
+    groups = {g.name: g for g in runtime_groups(project)}
     _SCAN.update(project=project, code=[groups[n] for n in code], llm=[groups[n] for n in llm], dry_run=dry_run,
                  validators={f.name: value_validator(f) for n in code for f in groups[n].features})
 
@@ -225,7 +245,7 @@ def _identity(call: Call) -> str:
     return json.dumps(call.model_dump(mode="json", exclude={"id", "issued_at"}), sort_keys=True)
 
 
-def _known_calls(box: Mailbox) -> dict[str, str]:
+def known_calls(box: Mailbox) -> dict[str, str]:
     """Identity of every call in the mailbox, read once; aifn's own lookup rescans the mailbox per submission."""
     requests = box.root / "requests"
     if not requests.is_dir():
@@ -237,27 +257,35 @@ def _known_calls(box: Mailbox) -> dict[str, str]:
     return known
 
 
+def issue_call(
+    box: Mailbox, known: dict[str, str], function: AiFunction[Any, Any], instruction: str, request: BaseModel,
+    workspace: Workspace, dry_run: bool = False,
+) -> Handle[Any]:
+    """Look up or enqueue one call; a dry run only looks the call up and writes nothing."""
+    call = Call(id=uuid4().hex, function=function.name, request=request.model_dump(mode="json", by_alias=True),
+                issued_at=datetime.now(UTC), workspace=workspace, instruction=instruction)
+    identity = _identity(call)
+    if identity in known:
+        call = call.model_copy(update={"id": known[identity]})
+    elif not dry_run:
+        box.issue(call)
+        known[identity] = call.id
+    return Handle(id=call.id, returns=function.returns, mailbox=box)
+
+
 def _issue(
-    project: Project, box: Mailbox, known: dict[str, str], group: Group, rows: list[IndexRow], dry_run: bool
+    project: Project, box: Mailbox, known: dict[str, str], group: Group, rows: list[IndexRow], dry_run: bool,
+    second: bool,
 ) -> list[tuple[Handle[Any], IndexRow]]:
-    """Look up or enqueue one call per row; a dry run only looks calls up and writes nothing."""
-    function = submitting_function(project, group)
+    function = submitting_function(project, group, second)
     instruction = function.instructions()
-    model = model_name(project, group)
+    model = model_name(project, group, second)
     handles = []
     for row in rows:
         request = ExtractRequest(trajectory_file=f"{row.id}.md", n_chunks=row.n_chunks, sha256=row.sha256,
                                  model=model)
-        call = Call(id=uuid4().hex, function=function.name, request=request.model_dump(mode="json", by_alias=True),
-                    issued_at=datetime.now(UTC), workspace=Workspace(directory=project.dataset_dir(row.dataset)),
-                    instruction=instruction)
-        identity = _identity(call)
-        if identity in known:
-            call = call.model_copy(update={"id": known[identity]})
-        elif not dry_run:
-            box.issue(call)
-            known[identity] = call.id
-        handles.append((Handle(id=call.id, returns=function.returns, mailbox=box), row))
+        workspace = Workspace(directory=project.dataset_dir(row.dataset))
+        handles.append((issue_call(box, known, function, instruction, request, workspace, dry_run), row))
     return handles
 
 

@@ -9,15 +9,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from traj_analyzer.schema import Trajectory
 
-FeatureType = Literal["boolean", "scalar", "category", "set", "vector", "map"]
+FeatureType = Literal["boolean", "scalar", "category", "set", "vector", "map", "paths"]
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,47}")
 
 
 class FeatureSpec(BaseModel):
-    """One feature: a boolean, a number, a label, a set of labels, a vector of numbers, or a map from label to number.
+    """One feature: a boolean, a number, a label, a set of labels, a vector of numbers, a map from label to number,
+    or a list of paths.
 
     `labels` fixes the allowed labels of a category, the items of a set, or the keys of a map; without it they are
     free strings. `range` bounds a scalar, the elements of a vector, or the values of a map.
+    A paths feature holds one path per event of the trajectory, such as a tool call, in order; a path has one
+    label per entry of `levels`, each level refining the one before it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -29,6 +32,8 @@ class FeatureSpec(BaseModel):
     labels: dict[str, str] | None = None
     per: Literal["chunk"] | None = None
     length: int | None = Field(default=None, ge=1)
+    levels: list[str] | None = None
+    """Names of the levels of a paths feature, from the coarsest to the finest."""
     thresholds: dict[str, float] = Field(default_factory=dict)
 
     @field_validator("name")
@@ -50,6 +55,10 @@ class FeatureSpec(BaseModel):
             raise ValueError(f"{self.name}: per and length apply only to vectors")
         if self.range and self.range[0] > self.range[1]:
             raise ValueError(f"{self.name}: range is reversed")
+        if (self.type == "paths") != bool(self.levels):
+            raise ValueError(f"{self.name}: levels are required for paths and apply to no other type")
+        if self.levels and len(set(self.levels)) != len(self.levels):
+            raise ValueError(f"{self.name}: level names must be distinct")
         return self
 
 

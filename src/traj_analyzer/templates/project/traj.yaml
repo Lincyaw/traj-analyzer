@@ -56,3 +56,17 @@ extract:
 
 sampling:
   vector_length: 10
+
+# The trajectories that count as normal behaviour: all datasets, or a list of dataset names.
+reference:
+  datasets: all
+  exclude: []
+
+# `traj evaluate` and `traj mine` measure LLM features a second time with `model`, which must differ from engine.model.
+evaluation:
+  size: 100
+  model: null
+
+mining:
+  singles: 20
+  pairs: 20

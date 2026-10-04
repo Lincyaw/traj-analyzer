@@ -125,13 +125,14 @@ def test_operator_kind_must_match_its_functions() -> None:
 
 def test_library_operators_are_atomic() -> None:
     refs = discover(None)
-    assert {"stats.basic", "stats.tool_usage", "meta.fields", "task.request_kinds", "user.complains",
+    assert {"stats.basic", "stats.tool_usage", "stats.tool_paths", "meta.fields", "task.request_kinds",
+            "user.complains",
             "user.corrects", "user.follow_up", "user.approves", "assistant.claims_done",
-            "assistant.asks_user"} == set(refs)
+            "assistant.asks_user", "llm.features"} == set(refs)
     for name, ref in refs.items():
         outputs = ref.operator.outputs(ref.operator.params())
         assert all(isinstance(f, FeatureSpec) for f in outputs)
-        assert outputs or name == "meta.fields"
+        assert outputs or name in ("meta.fields", "llm.features")
         if ref.operator.kind == "llm":
             assert all(f.type in ("boolean", "category", "set") for f in outputs), name
 

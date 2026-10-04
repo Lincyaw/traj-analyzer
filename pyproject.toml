@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.13.5",
     "ruamel-yaml>=0.19.1",
     "scikit-learn>=1.9.1",
+    "sqlglot>=30.19",
     "typer>=0.27.2",
     "uvicorn>=0.54.0",
 ]
