@@ -4,53 +4,26 @@ import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import duckdb
 import pyarrow as pa
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
 
 from traj_analyzer.features.table import KEY, read_group, status_column
 from traj_analyzer.ingest import load_index
 from traj_analyzer.operators.base import FeatureSpec
 from traj_analyzer.operators.catalog import Group, load_groups
 from traj_analyzer.project import Project
+from traj_analyzer.viewer.analysis import AnalysisRequest, ProfileRequest, arrow_response, profile
+from traj_analyzer.viewer.query import QueryRequest, RowsRequest
+from traj_analyzer.viewer.query import quote as _quote
 
 FEATURES = "features"
 """The table joining the values of every extracted group on the trajectory key."""
 
 STATIC = Path(__file__).parent / "static"
-
-
-class Sorter(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    field: str
-    dir: Literal["asc", "desc"]
-
-
-class Filter(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    field: str
-    type: Literal["like"]
-    value: str
-
-
-class RowsRequest(BaseModel):
-    """What Tabulator sends for one page, plus the text search and the SQL condition typed above the table."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    table: str
-    page: int = Field(ge=1)
-    size: int = Field(ge=1, le=1000)
-    sorters: list[Sorter] = []
-    filters: list[Filter] = []
-    search: str = ""
-    where: str = ""
 
 
 @dataclass
@@ -60,10 +33,6 @@ class Source:
     columns: dict[str, str]
     """Column name to DuckDB type."""
     rows: int
-
-
-def _quote(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
 
 
 class Database:
@@ -101,11 +70,11 @@ class Database:
         (rows,) = self.connection.execute(f"SELECT count(*) FROM {sql}").fetchone() or (0,)
         return Source(name=name, sql=sql, columns=columns, rows=rows)
 
-    def rows(self, request: RowsRequest) -> dict[str, Any]:
+    def query(self, request: QueryRequest) -> tuple[Source, str, list[Any]]:
         source = self.sources.get(request.table)
         if source is None:
             raise HTTPException(404, f"Unknown table {request.table}")
-        unknown = sorted({item.field for item in (*request.sorters, *request.filters)} - set(source.columns))
+        unknown = sorted({item.field for item in request.filters} - set(source.columns))
         if unknown:
             raise HTTPException(400, f"Unknown columns {unknown}")
         text = {name: f"lower(CAST({_quote(name)} AS VARCHAR))" for name in source.columns}
@@ -120,12 +89,26 @@ class Database:
         if request.where.strip():
             conditions.append(f"({request.where})")
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM {source.sql}{where}"
+        try:
+            statements = self.connection.extract_statements(sql)
+        except duckdb.Error as error:
+            raise HTTPException(400, str(error)) from error
+        if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+            raise HTTPException(400, "Only a single read-only SELECT condition is allowed")
+        return source, sql, params
+
+    def rows(self, request: RowsRequest) -> dict[str, Any]:
+        source, sql, params = self.query(request)
+        unknown = sorted({item.field for item in request.sorters} - set(source.columns))
+        if unknown:
+            raise HTTPException(400, f"Unknown columns {unknown}")
         order = [f"{_quote(s.field)} {s.dir.upper()} NULLS LAST" for s in request.sorters] + [_quote(KEY)]
         cursor = self.connection.cursor()
         try:
-            (total,) = cursor.execute(f"SELECT count(*) FROM {source.sql}{where}", params).fetchone() or (0,)
+            (total,) = cursor.execute(f"SELECT count(*) FROM ({sql})", params).fetchone() or (0,)
             result = cursor.execute(
-                f"SELECT * FROM {source.sql}{where} ORDER BY {', '.join(order)} LIMIT ? OFFSET ?",
+                f"SELECT * FROM ({sql}) ORDER BY {', '.join(order)} LIMIT ? OFFSET ?",
                 [*params, request.size, (request.page - 1) * request.size])
             names = [column[0] for column in result.description or []]
             data = [dict(zip(names, row, strict=True)) for row in result.fetchall()]
@@ -178,6 +161,14 @@ def create_app(project: Project) -> FastAPI:
     @app.post("/api/rows")
     def rows(request: RowsRequest) -> dict[str, Any]:
         return database.rows(request)
+
+    @app.post("/api/analysis")
+    def analysis(request: AnalysisRequest) -> Response:
+        return arrow_response(database, request)
+
+    @app.post("/api/profile")
+    def feature_profile(request: ProfileRequest) -> dict[str, Any]:
+        return profile(database, request)
 
     app.mount("/", StaticFiles(directory=STATIC, html=True))
     return app

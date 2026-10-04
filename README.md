@@ -39,7 +39,10 @@ Both agents read the same skill files, including any later project edits or supp
 The tool repository uses the same directory arrangement; maintain skill content in `.claude/skills/`.
 Launch either agent in the analysis project to define features or write reports.
 
-`traj view` serves a web page at http://127.0.0.1:8000 for paging through, searching and filtering the feature table.
+`traj view` serves an interactive analysis page at http://127.0.0.1:8000.
+Select features and grouping columns, then configure charts, aggregates, filters, expressions and multiple panels in the embedded Perspective viewer.
+The Rows mode retains the searchable feature table.
+See [Interactive analysis](docs/viewer.md) for label analysis, saved views and data limits.
 `traj table` prints CSV to stdout, and every other command except `traj view` prints JSON.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 

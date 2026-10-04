@@ -7,6 +7,8 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="tabulator_simple.min.css">
   <link rel="stylesheet" href="viewer.css">
+  <link rel="stylesheet" href="vendor/pro.css">
+  <link rel="stylesheet" href="vendor/pro-dark.css">
 </head>
 <body>
   <header class="bar">
@@ -15,6 +17,10 @@
       <span class="project" id="project"></span>
     </div>
     <nav class="tables" id="tables" aria-label="Tables"></nav>
+    <div class="modes" aria-label="View mode">
+      <button id="analysis-mode" aria-pressed="true">Analysis</button>
+      <button id="table-mode" aria-pressed="false">Rows</button>
+    </div>
   </header>
   <section class="controls">
     <label class="field search">
@@ -29,10 +35,37 @@
     <button id="reset" class="ghost">Reset</button>
   </section>
   <div class="error" id="error" hidden></div>
+  <section class="analysis-controls" id="analysis-controls">
+    <label class="field">Source <select id="analysis-source" aria-label="Analysis source"></select></label>
+    <label class="field">Feature <select id="analysis-measure" aria-label="Analysis feature"></select></label>
+    <label class="field">Group by <select id="analysis-group" aria-label="Comparison group"></select></label>
+    <button id="distribution" class="ghost">Distribution</button>
+    <button id="compare" class="ghost">Compare</button>
+    <button id="relationship" class="ghost">Relationship</button>
+    <button id="add-panel" class="ghost">Add panel</button>
+    <details class="column-options">
+      <summary>Columns to load</summary>
+      <label>Select columns, then apply.<select id="analysis-columns" multiple aria-label="Columns to load"></select></label>
+      <button id="load-columns" class="primary">Apply columns</button>
+    </details>
+  </section>
+  <section class="analysis-controls" id="view-controls">
+    <label class="field">Saved view <select id="saved-views" aria-label="Saved view"><option value="">Choose a view</option></select></label>
+    <label class="field"><input id="view-name" aria-label="View name" placeholder="View name" maxlength="100"></label>
+    <button id="save-view" class="ghost">Save</button>
+    <button id="delete-view" class="ghost">Delete</button>
+    <button id="export-view" class="ghost">Export view</button>
+    <button id="import-view" class="ghost">Import view</button>
+    <input id="view-file" type="file" accept=".json,application/json" hidden>
+    <button id="export-data" class="ghost">Export data</button>
+    <button id="reset-view" class="ghost">Reset view</button>
+  </section>
+  <div id="analysis-info" role="status" aria-live="polite"></div>
   <main class="card">
-    <div id="grid"></div>
+    <div id="grid" hidden></div>
+    <div id="analysis"></div>
   </main>
   <script src="tabulator.min.js"></script>
-  <script src="viewer.js"></script>
+  <script type="module" src="viewer.js"></script>
 </body>
 </html>

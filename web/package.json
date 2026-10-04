@@ -1,0 +1,17 @@
+{
+  "name": "traj-analyzer-viewer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@perspective-dev/client": "5.5.1",
+    "@perspective-dev/viewer": "5.5.1",
+    "@perspective-dev/viewer-charts": "5.5.1",
+    "@perspective-dev/viewer-datagrid": "5.5.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

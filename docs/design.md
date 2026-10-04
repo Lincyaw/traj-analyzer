@@ -457,7 +457,7 @@ The `traj-report` skill guides Codex or Claude Code through these steps:
 | `traj operators disable <name>` | remove the entries whose operator or instance name is `<name>` from `traj.yaml` |
 | `traj extract [--group g] [--dataset d] [--key k] [--limit n] [--workers n] [--dry-run]` | check the configuration and samplers, extract features, and report coverage per group |
 | `traj table [--dataset d] [--column c...]` | print the wide table as CSV |
-| `traj view [--host 127.0.0.1] [--port 8000]` | serve a web page for paging through, searching and filtering the feature table |
+| `traj view [--host 127.0.0.1] [--port 8000]` | serve configurable feature analysis and a searchable feature table |
 | `traj sample [--sampler default] [--budget n]` | sample |
 
 Options that take several values repeat, such as `--group a --group b`.
@@ -466,8 +466,15 @@ Options that take several values repeat, such as `--group a --group b`.
 `traj view` is a FastAPI application served by uvicorn, in `src/traj_analyzer/viewer/`.
 At start it loads the trajectory index and every group that has a table file into an in-memory DuckDB database, then switches off DuckDB's file access.
 The page offers the table `features`, which joins every group's value columns on `key` next to the trajectory's dataset, and each group's own table with its status, detail and evidence columns.
-The front end is one static page using Tabulator 6.5.3 with its `simple` theme, whose files are kept in `viewer/static/`; paging, sorting and filtering run on the server.
-The page has three ways to narrow the rows:
+The static front end offers an Analysis mode with Perspective and a Rows mode with Tabulator.
+Analysis supports configurable charts, aggregates, filters, expressions and multiple panels.
+`POST /api/analysis` returns the complete filtered input as an Arrow IPC stream, bounded by explicit browser input limits.
+`POST /api/profile` computes counts and numeric summary statistics over the same input population.
+Collection sources expand one set, vector or map into label records with their textual trajectory context.
+The assets are bundled locally, and saved workspace configurations are stored per project in browser storage or exported as JSON.
+See [Interactive analysis](viewer.md) for source semantics, saved views and frontend maintenance.
+Tabulator's paging, sorting and filtering run on the server.
+Rows mode has three ways to narrow the rows:
 - **Search box**: keeps rows where any column, printed as text, contains the words, ignoring case.
 - **Filter box under each column header**: keeps rows where that column contains the typed text, ignoring case.
 - **SQL condition field**: accepts a DuckDB `WHERE` condition such as `f1 < 0.3 AND gt_focused_query`, and shows DuckDB's error message when the condition is invalid.

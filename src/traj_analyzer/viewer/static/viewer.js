@@ -1,6 +1,12 @@
-const state = { table: null, search: "", where: "" };
+import { Analysis } from "./analysis.js";
+
+const state = { table: null, search: "", where: "", mode: "analysis" };
 const errorBox = document.getElementById("error");
 let grid = null;
+let currentTable = null;
+const analysis = new Analysis(showError);
+
+window.addEventListener("unhandledrejection", (event) => showError(event.reason.message ?? String(event.reason)));
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -106,12 +112,25 @@ function headerNote(column) {
   };
 }
 
-function show(table) {
+async function show(table, loadAnalysis = true) {
   state.table = table.name;
+  currentTable = table;
   for (const tab of document.querySelectorAll("#tables button")) {
     tab.setAttribute("aria-selected", String(tab.dataset.table === table.name));
   }
   showError("");
+  if (state.mode === "analysis") {
+    if (grid) {
+      grid.destroy();
+      grid = null;
+    }
+    await analysis.show(table, state, loadAnalysis);
+  } else {
+    showRows(table);
+  }
+}
+
+function showRows(table) {
   if (grid) {
     grid.destroy();
   }
@@ -154,20 +173,46 @@ function show(table) {
   });
 }
 
-function apply() {
+async function apply() {
   state.search = document.getElementById("search").value;
   state.where = document.getElementById("where").value;
-  grid.setPage(1);
+  if (state.mode === "analysis") {
+    await analysis.load(state);
+  } else {
+    await grid.setPage(1);
+  }
 }
 
-function reset() {
+async function reset() {
   document.getElementById("search").value = "";
   document.getElementById("where").value = "";
   state.search = "";
   state.where = "";
-  grid.clearHeaderFilter();
-  grid.clearSort();
-  grid.setPage(1);
+  if (state.mode === "analysis") {
+    await analysis.load(state);
+  } else {
+    showRows(currentTable);
+  }
+}
+
+async function mode(value) {
+  state.mode = value;
+  for (const id of ["analysis", "analysis-controls", "view-controls", "analysis-info"]) {
+    document.getElementById(id).hidden = value !== "analysis";
+  }
+  document.getElementById("grid").hidden = value !== "rows";
+  document.getElementById("analysis-mode").setAttribute("aria-pressed", String(value === "analysis"));
+  document.getElementById("table-mode").setAttribute("aria-pressed", String(value === "rows"));
+  showError("");
+  if (value === "analysis") {
+    if (grid) {
+      grid.destroy();
+      grid = null;
+    }
+    await analysis.show(currentTable, state);
+  } else {
+    showRows(currentTable);
+  }
 }
 
 async function start() {
@@ -178,6 +223,13 @@ async function start() {
   document.getElementById("project").textContent = project.name;
   document.getElementById("project").title = project.root;
   document.title = `${project.name} · traj viewer`;
+  analysis.initialize(project, tables, async (snapshot) => {
+    document.getElementById("search").value = snapshot.search;
+    document.getElementById("where").value = snapshot.where;
+    state.search = snapshot.search;
+    state.where = snapshot.where;
+    await show(tables.find((table) => table.name === snapshot.table), false);
+  });
   const nav = document.getElementById("tables");
   for (const table of tables) {
     const tab = element("button", "", table.name);
@@ -189,6 +241,8 @@ async function start() {
   }
   document.getElementById("apply").addEventListener("click", apply);
   document.getElementById("reset").addEventListener("click", reset);
+  document.getElementById("analysis-mode").addEventListener("click", () => mode("analysis"));
+  document.getElementById("table-mode").addEventListener("click", () => mode("rows"));
   for (const id of ["search", "where"]) {
     document.getElementById(id).addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -196,7 +250,7 @@ async function start() {
       }
     });
   }
-  show(tables[0]);
+  await show(tables[0]);
 }
 
 start();
