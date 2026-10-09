@@ -3,13 +3,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
- 
-from aifn import AiFunction, Mailbox, Model, Policy, Registry, Worker
-from aifn.engines import DeepSeekEngine
 
-from traj_analyzer import proposals
+from aifn import AiFunction, Mailbox, Model, Policy
+
 from traj_analyzer.features.spec import ExtractRequest, output_model, write_instruction
-from traj_analyzer.operators.catalog import Group, runtime_groups
+from traj_analyzer.operators.catalog import Group
 from traj_analyzer.project import ConfigError, Project
 
 
@@ -54,18 +52,6 @@ def mailbox(project: Project) -> Mailbox:
     return Mailbox(root=project.mailbox_dir)
 
 
-def registry(project: Project) -> Registry:
-    functions = dict(proposals.functions(project))
-    for group in runtime_groups(project):
-        if group.is_code:
-            continue
-        functions[group.function_name] = build_function(project, group)
-        if project.config.evaluation.model is not None:
-            second = build_function(project, group, second=True)
-            functions[second.name] = second
-    return Registry(functions=functions)
-
-
 def policy(project: Project) -> Policy:
     return Policy(attempts=project.config.extract.attempts)
 
@@ -76,21 +62,3 @@ def engine_env(project: Project) -> dict[str, str]:
     if missing:
         raise ConfigError(f"Environment variables required by engine.env_passthrough: {missing}")
     return {name: os.environ[name] for name in names}
-
-
-def make_worker(worker_id: str) -> Worker:
-    """Factory for `python -m aifn worker traj_analyzer.runtime:make_worker`."""
-    project = Project.find()
-    config = project.config.engine
-    patches = tuple((project.root / Path(p).expanduser()).resolve() for p in config.patches)
-    missing = [str(p) for p in patches if not p.is_file()]
-    if missing:
-        raise ConfigError(f"engine.patches files do not exist: {missing}")
-    return Worker(
-        mailbox=mailbox(project),
-        registry=registry(project),
-        engine=DeepSeekEngine(dsh_home=Path(config.dsh_home).expanduser(), env=engine_env(project),
-                              patches=patches),
-        policy=policy(project),
-        id=worker_id,
-    )

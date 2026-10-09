@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from traj_analyzer.layers.tables import Tables
 from traj_analyzer.operators.base import FeatureSpec, NoParams, Operator
 from traj_analyzer.schema import Trajectory
 
@@ -17,7 +18,7 @@ def outputs(params: NoParams) -> list[FeatureSpec]:
     ]
 
 
-def compute(trajectory: Trajectory, params: NoParams) -> dict[str, Any]:
+def compute(trajectory: Trajectory, tables: Tables, params: NoParams) -> dict[str, Any]:
     stamps = [datetime.fromisoformat(s.timestamp) for s in trajectory.steps if s.timestamp]
     return {
         "n_steps": float(len(trajectory.steps)),

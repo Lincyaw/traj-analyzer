@@ -16,7 +16,7 @@ def outputs(params: NoParams) -> list[FeatureSpec]:
 
 
 OPERATOR = Operator(
-    kind="llm",
+    kind="judgment",
     description="The feature set of the recorded model runs in tests/data/replay.",
     outputs=outputs,
     requires=has_tool_calls,

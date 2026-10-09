@@ -8,8 +8,12 @@ from typing import Any
 
 from traj_analyzer.adapters._blocks import PLACEHOLDERS, block_text
 from traj_analyzer.files import iter_jsonl
-from traj_analyzer.schema import Role, Step, Trajectory
+from traj_analyzer.schema import INTERRUPTION, Step, Trajectory
 
+HARNESS = "claude_code"
+"""The harness profile the trajectories name."""
+INTERRUPTED = "[Request interrupted by user"
+"""The opening of the text Claude Code records under the user's role when the user interrupts the assistant."""
 _LOCAL_COMMAND = re.compile(
     r"\s*<(command-name|command-message|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr)>"
 )
@@ -19,7 +23,8 @@ class ClaudeCodeAdapter:
     """Claude Code session files, `~/.claude/projects/<project>/<session>.jsonl`.
 
     Conversation records are read in file order, so turns abandoned by a rewind stay in the trajectory.
-    User records not typed by a person, such as task notifications and local commands, become system steps.
+    User records not typed by a person, such as task notifications and local commands, become system steps, and
+    the text that records an interruption by the user becomes a notice step named `interruption`.
     """
 
     def __init__(
@@ -63,19 +68,18 @@ class ClaudeCodeAdapter:
             return
         metadata["started_at"] = steps[0].timestamp
         metadata["ended_at"] = steps[-1].timestamp
-        yield Trajectory(id=path.stem, dataset=dataset, metadata=metadata, steps=steps)
+        yield Trajectory(id=path.stem, dataset=dataset, metadata=metadata, steps=steps, harness=HARNESS)
 
     def _steps(
         self, kind: str, content: Any, timestamp: str, tool_names: dict[str, str]
     ) -> Iterator[Step]:
         if isinstance(content, str):
-            yield Step(index=0, role=_text_role(kind, content), content=content, timestamp=timestamp)
+            yield _text_step(kind, content, timestamp)
             return
         for block in content:
             match block["type"]:
                 case "text":
-                    yield Step(index=0, role=_text_role(kind, block["text"]), content=block["text"],
-                               timestamp=timestamp)
+                    yield _text_step(kind, block["text"], timestamp)
                 case "image":
                     yield Step(index=0, role=kind, content=PLACEHOLDERS["image"],  # type: ignore[arg-type]
                                timestamp=timestamp)
@@ -103,11 +107,14 @@ class ClaudeCodeAdapter:
                     raise ValueError(f"Unknown Claude Code content block type: {other}")
 
 
-def _text_role(speaker: str, text: str) -> Role:
-    """Local slash commands and `!` shell commands are recorded as user text but are not typed prose."""
+def _text_step(speaker: str, text: str, timestamp: str) -> Step:
+    """A text block of a record: an interruption notice, a local slash command or `!` shell command recorded as
+    user text, or a message."""
+    if speaker == "user" and text.lstrip().startswith(INTERRUPTED):
+        return Step(index=0, role="user", kind="notice", name=INTERRUPTION, content=text, timestamp=timestamp)
     if speaker == "user" and _LOCAL_COMMAND.match(text):
-        return "system"
-    return speaker  # type: ignore[return-value]
+        return Step(index=0, role="system", content=text, timestamp=timestamp)
+    return Step(index=0, role=speaker, content=text, timestamp=timestamp)  # type: ignore[arg-type]
 
 
 ADAPTER = ClaudeCodeAdapter

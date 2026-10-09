@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from traj_analyzer.layers.tables import Tables
 from traj_analyzer.operators.base import FeatureSpec, NoParams, Operator
 from traj_analyzer.schema import Trajectory
 
@@ -20,7 +21,7 @@ def outputs(params: NoParams) -> list[FeatureSpec]:
     ]
 
 
-def compute(trajectory: Trajectory, params: NoParams) -> dict[str, Any]:
+def compute(trajectory: Trajectory, tables: Tables, params: NoParams) -> dict[str, Any]:
     calls = [s for s in trajectory.steps if s.kind == "tool_call"]
     results = [s for s in trajectory.steps if s.kind == "tool_result"]
     return {

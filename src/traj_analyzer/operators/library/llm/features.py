@@ -15,6 +15,12 @@ class LlmFeature(BaseModel):
     labels: dict[str, str] | None = None
     guidance: str = ""
     """Judging criteria for this feature, written into the instruction."""
+    scope: str | None = None
+    """Condition over extracted code features that a trajectory meets when the question can arise in it."""
+    tail_precision: float | None = Field(default=None, ge=0, le=1)
+    """Share of the feature's tail the tail check found worth a look, written by mining."""
+    alert: bool = False
+    """Whether the feature raises alerts, from its tail precision."""
 
 
 class Params(BaseModel):
@@ -25,7 +31,8 @@ class Params(BaseModel):
 
 
 def outputs(params: Params) -> list[FeatureSpec]:
-    return [FeatureSpec(name=name, type=spec.type, description=spec.description, labels=spec.labels)
+    return [FeatureSpec(name=name, type=spec.type, description=spec.description, labels=spec.labels,
+                        scope=spec.scope)
             for name, spec in params.features.items()]
 
 
@@ -34,7 +41,7 @@ def guidance(params: Params) -> str:
 
 
 OPERATOR = Operator(
-    kind="llm",
+    kind="judgment",
     description="Features defined in traj.yaml: each one is a literal question about what the trajectory shows.",
     tags=("chat", "agent"),
     params=Params,

@@ -12,7 +12,7 @@ def outputs(params: NoParams) -> list[FeatureSpec]:
 
 
 OPERATOR = Operator(
-    kind="llm",
+    kind="judgment",
     description="Whether the user follows up on an assistant answer.",
     tags=("chat", "agent"),
     outputs=outputs,

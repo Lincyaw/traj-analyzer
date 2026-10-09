@@ -29,10 +29,11 @@ from traj_analyzer.ingest import ingest, load_index, render_markdown
 from traj_analyzer.operators.base import FeatureSpec, Operator
 from traj_analyzer.operators.catalog import discover, load_groups
 from traj_analyzer.project import Project, RenderConfig
-from traj_analyzer.runtime import mailbox, policy, registry
+from traj_analyzer.runtime import mailbox, policy
 from traj_analyzer.sampling import SamplerSpec, StrategySpec, expand_where, load_sampler, sample
 from traj_analyzer.vectorize import Frame, build_frame
 from traj_analyzer.viewer.server import create_app
+from traj_analyzer.worker import registry
 
 DATA = Path(__file__).parent / "data"
 REPLAY = DATA / "replay"
@@ -74,6 +75,31 @@ def test_claude_code_adapter_reads_real_session() -> None:
     assert results == calls[: len(results)]
     notifications = [s for s in trajectory.steps if s.content.lstrip().startswith("<task-notification>")]
     assert notifications and all(s.role == "system" for s in notifications)
+    assert trajectory.harness == "claude_code" and not [s for s in trajectory.steps if s.kind == "notice"]
+
+
+def test_claude_code_adapter_marks_interruptions_as_notices(tmp_path: Path) -> None:
+    def record(kind: str, content: Any) -> str:
+        message: dict[str, Any] = {"role": kind, "content": content}
+        if kind == "assistant":
+            message["model"] = "m"
+        return json.dumps({"type": kind, "message": message, "timestamp": "2026-10-01T10:00:00Z"})
+
+    interrupted = "[Request interrupted by user for tool use]"
+    lines = [
+        record("user", "fix it"),
+        record("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "sleep 100"}}]),
+        record("user", [{"type": "tool_result", "tool_use_id": "t1", "content": interrupted, "is_error": True},
+                        {"type": "text", "text": interrupted}]),
+        record("user", "stop, do it another way"),
+    ]
+    path = tmp_path / "s.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (trajectory,) = ClaudeCodeAdapter().read(path, "cc")
+    assert [(s.role, s.kind, s.name) for s in trajectory.steps] == [
+        ("user", "message", None), ("assistant", "tool_call", "Bash"), ("tool", "tool_result", "Bash"),
+        ("user", "notice", "interruption"), ("user", "message", None)]
+    assert trajectory.harness == "claude_code" and sum(s.is_user_message for s in trajectory.steps) == 2
 
 
 def test_claude_code_adapter_fails_on_a_corrupt_line(tmp_path: Path) -> None:
@@ -120,20 +146,23 @@ def test_operator_kind_must_match_its_functions() -> None:
     with pytest.raises(ValueError, match="compute"):
         Operator(kind="code", description="no compute", outputs=lambda p: [])
     with pytest.raises(ValueError, match="compute"):
-        Operator(kind="llm", description="compute", outputs=lambda p: [], compute=lambda t, p: {})
+        Operator(kind="judgment", description="compute", outputs=lambda p: [], compute=lambda t, x, p: {})
+    with pytest.raises(ValueError, match="aggregates"):
+        Operator(kind="judgment", description="turns", outputs=lambda p: [], unit="turn")
 
 
 def test_library_operators_are_atomic() -> None:
     refs = discover(None)
-    assert {"stats.basic", "stats.tool_usage", "stats.tool_paths", "meta.fields", "task.request_kinds",
-            "user.complains",
+    assert {"stats.basic", "stats.tool_usage", "stats.tool_paths", "stats.actions", "stats.dialogue", "meta.fields",
+            "events.generic", "signals.user_reaction", "signals.end_state", "signals.request_fit",
+            "task.request_kinds", "task.prompt_intent", "user.complains",
             "user.corrects", "user.follow_up", "user.approves", "assistant.claims_done",
             "assistant.asks_user", "llm.features"} == set(refs)
     for name, ref in refs.items():
         outputs = ref.operator.outputs(ref.operator.params())
         assert all(isinstance(f, FeatureSpec) for f in outputs)
         assert outputs or name in ("meta.fields", "llm.features")
-        if ref.operator.kind == "llm":
+        if ref.operator.kind == "judgment":
             assert all(f.type in ("boolean", "category", "set") for f in outputs), name
 
 
@@ -251,8 +280,12 @@ def test_viewer_pages_searches_and_filters(project: Project) -> None:
     extract(project, groups=["stats-basic", "fixture-tool_share"])
     client = TestClient(create_app(project))
     tables = {t["name"]: t for t in client.get("/api/tables").json()}
-    assert set(tables) == {"features", "stats-basic", "fixture-tool_share"}
+    assert set(tables) == {"features", "stats-basic", "fixture-tool_share", "tables.steps", "tables.trajectories",
+                           "tables.evidence", "tables.events"}
     assert tables["features"]["rows"] == 70
+    assert tables["tables.steps"]["rows"] > 70
+    notes = {c["name"]: c["note"] for c in tables["tables.steps"]["columns"]}
+    assert notes["turn"].startswith("How many messages the user had typed")
     assert {"key", "dataset", "n_steps", "tool_share"} <= {c["name"] for c in tables["features"]["columns"]}
     assert "tool_share__status" in {c["name"] for c in tables["fixture-tool_share"]["columns"]}
     notes = {c["name"]: c["note"] for c in tables["features"]["columns"]}
@@ -375,7 +408,7 @@ class ReplayWorkers:
     def check(self, project: Project) -> None:
         pass
 
-    def run(self, project: Project, count: int) -> None:
+    def run(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None:
         box = mailbox(project)
         self.directory.mkdir(parents=True, exist_ok=True)
         for call in box.pending():
@@ -449,7 +482,7 @@ def test_cli_extract_checks_samplers(project: Project, capsys: pytest.CaptureFix
 
 def test_cli_operators_enable_and_disable(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
     capsys.readouterr()
-    assert main(["operators", "list", "--kind", "llm"]) == 0
+    assert main(["operators", "list", "--kind", "judgment"]) == 0
     listed = {op["name"]: op for op in json.loads(capsys.readouterr().out)["operators"]}
     assert listed["fixture.outcome"]["origin"] == "project"
     assert listed["fixture.outcome"]["enabled_as"] == ["fixture.outcome"]

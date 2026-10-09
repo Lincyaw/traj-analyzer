@@ -45,7 +45,7 @@ class Relation(BaseModel):
 class Card(BaseModel):
     feature: str
     group: str
-    kind: Literal["code", "llm"]
+    kind: Literal["code", "judgment"]
     type: str
     noise: float | None = None
     """Mean disagreement between two measurements; None when no trajectory has both."""

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from traj_analyzer.layers.tables import Tables
 from traj_analyzer.operators.base import FeatureSpec, NoParams, Operator, has_tool_calls
 from traj_analyzer.schema import Step, Trajectory
 
@@ -16,7 +17,7 @@ def outputs(params: NoParams) -> list[FeatureSpec]:
     )]
 
 
-def compute(trajectory: Trajectory, params: NoParams) -> dict[str, Any]:
+def compute(trajectory: Trajectory, tables: Tables, params: NoParams) -> dict[str, Any]:
     calls: list[tuple[Step, list[str]]] = []
     for step in trajectory.steps:
         if step.kind == "tool_call":

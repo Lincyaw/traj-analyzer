@@ -30,7 +30,7 @@ def outputs(params: Params) -> list[FeatureSpec]:
 
 
 OPERATOR = Operator(
-    kind="llm",
+    kind="judgment",
     description="What kinds of request the user makes.",
     tags=("chat", "agent"),
     params=Params,

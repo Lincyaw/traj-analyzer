@@ -4,7 +4,7 @@ import json
 import re
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,8 +12,18 @@ from pydantic import BaseModel
 from ruamel.yaml import YAML
 
 from traj_analyzer.files import load_module
-from traj_analyzer.operators.base import FeatureSpec, Operator
-from traj_analyzer.project import CONFIG_FILE, CallConfig, Config, ConfigError, OperatorUse, Project
+from traj_analyzer.layers.tables import Tables
+from traj_analyzer.operators.base import Aggregate, FeatureSpec, Operator, Unit
+from traj_analyzer.project import (
+    CONFIG_FILE,
+    CallConfig,
+    Config,
+    ConfigError,
+    OperatorUse,
+    Project,
+    SampleConfig,
+    WindowConfig,
+)
 from traj_analyzer.schema import Trajectory
 
 LIBRARY = Path(__file__).parent / "library"
@@ -31,7 +41,12 @@ class OperatorRef:
 
 @dataclass(frozen=True)
 class Instance:
-    """One enabled use of an operator, with validated params and feature names after `prefix`."""
+    """One enabled use of an operator, with validated params and feature names after `prefix`.
+
+    `features` are the trajectory features: the outputs of a code operator or of a judgment operator over whole
+    trajectories, and the aggregates of a judgment operator over turns or windows, whose per-unit `outputs` go to
+    the judgments table.
+    """
 
     ref: OperatorRef
     id: str
@@ -39,15 +54,24 @@ class Instance:
     features: list[FeatureSpec]
     original: dict[str, str]
     """Maps each feature name to the output name the operator gives it."""
+    outputs: list[FeatureSpec] = field(default_factory=list)
+    output_names: dict[str, str] = field(default_factory=dict)
+    """Maps each per-unit output name the operator gives to the name after `prefix`."""
+    aggregates: list[Aggregate] = field(default_factory=list)
+    use: OperatorUse | None = None
+
+    @property
+    def unit(self) -> Unit:
+        return self.ref.operator.unit
 
     def applies(self, trajectory: Trajectory) -> bool:
         requires = self.ref.operator.requires
         return requires is None or requires(trajectory)
 
-    def compute(self, trajectory: Trajectory) -> dict[str, Any]:
+    def compute(self, trajectory: Trajectory, tables: Tables) -> dict[str, Any]:
         compute = self.ref.operator.compute
         assert compute is not None
-        values = compute(trajectory, self.params)
+        values = compute(trajectory, tables, self.params)
         expected = set(self.original.values())
         if set(values) != expected:
             raise ValueError(f"{self.ref.name} returned {sorted(values)}, expected {sorted(expected)}")
@@ -56,21 +80,49 @@ class Instance:
 
 @dataclass(frozen=True)
 class Group:
-    """What runs together: one code operator instance, or all LLM operator instances of one call."""
+    """What runs together: one code operator instance, or all judgment operator instances of one call."""
 
     name: str
-    kind: Literal["code", "llm"]
+    kind: Literal["code", "judgment"]
     instances: list[Instance]
     evidence: bool = False
     model: str | None = None
+    unit: Unit = "trajectory"
+    sample: SampleConfig | None = None
+    window: WindowConfig = field(default_factory=WindowConfig)
+    context: int = 8
+    turns_per_call: int = 20
+    tail: int | None = None
 
     @property
     def features(self) -> list[FeatureSpec]:
         return [f for i in self.instances for f in i.features]
 
+    def parts(self, units: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
+        """The units of a trajectory as the group's calls take them: one list per call."""
+        if self.unit == "turn":
+            size = self.turns_per_call
+            return [units[i:i + size] for i in range(0, len(units), size)]
+        return [[unit] for unit in units]
+
+    @property
+    def reads_file(self) -> bool:
+        """Whether a call reads the rendered trajectory file itself, as a group over whole trajectories without
+        `tail` does; the other groups read a file rendered for the call."""
+        return self.unit == "trajectory" and self.tail is None
+
+    @property
+    def unit_outputs(self) -> list[FeatureSpec]:
+        """The per-unit outputs of a group over turns or windows; empty for a group over whole trajectories."""
+        return [f for i in self.instances for f in i.outputs] if self.unit != "trajectory" else []
+
     @property
     def is_code(self) -> bool:
         return self.kind == "code"
+
+    @property
+    def tables(self) -> tuple[str, ...]:
+        return tuple(sorted({t for i in self.instances for t in i.ref.operator.tables}))
 
     @property
     def function_name(self) -> str:
@@ -107,13 +159,27 @@ def instantiate(ref: OperatorRef, use: OperatorUse) -> Instance:
     outputs = ref.operator.outputs(params)
     if not outputs:
         raise ConfigError(f"{ref.name} produces no outputs")
-    original: dict[str, str] = {}
-    features = []
-    for output in outputs:
-        name = f"{use.prefix}_{output.name}" if use.prefix else output.name
-        original[name] = output.name
-        features.append(FeatureSpec.model_validate({**output.model_dump(), "name": name}))
-    return Instance(ref=ref, id=use.alias or ref.name, params=params, features=features, original=original)
+
+    def renamed(spec: FeatureSpec) -> FeatureSpec:
+        name = f"{use.prefix}_{spec.name}" if use.prefix else spec.name
+        return FeatureSpec.model_validate({**spec.model_dump(), "name": name})
+
+    aggregates = ref.operator.aggregates(params) if ref.operator.aggregates is not None else []
+    unit_outputs: list[FeatureSpec] = []
+    output_names: dict[str, str] = {}
+    if ref.operator.unit != "trajectory":
+        if not aggregates:
+            raise ConfigError(f"{ref.name} judges {ref.operator.unit}s and declares no aggregates")
+        by_name = {spec.name: spec for spec in outputs}
+        features = [renamed(aggregate.spec(by_name)) for aggregate in aggregates]
+        original = {renamed(aggregate.spec(by_name)).name: aggregate.name for aggregate in aggregates}
+        unit_outputs = [renamed(spec) for spec in outputs]
+        output_names = {spec.name: renamed(spec).name for spec in outputs}
+    else:
+        features = [renamed(spec) for spec in outputs]
+        original = {renamed(spec).name: spec.name for spec in outputs}
+    return Instance(ref=ref, id=use.alias or ref.name, params=params, features=features, original=original,
+                    outputs=unit_outputs, output_names=output_names, aggregates=aggregates, use=use)
 
 
 def load_groups(project: Project, only: list[str] | None = None) -> list[Group]:
@@ -133,12 +199,17 @@ def load_groups(project: Project, only: list[str] | None = None) -> list[Group]:
             calls.setdefault(use.call or "default", []).append(instance)
     unknown_calls = sorted(set(project.config.calls) - set(calls))
     if unknown_calls:
-        raise ConfigError(f"calls configured without enabled llm operators: {unknown_calls}")
-    llm = []
+        raise ConfigError(f"calls configured without enabled judgment operators: {unknown_calls}")
+    judged = []
     for call, instances in calls.items():
+        units = {instance.unit for instance in instances}
+        if len(units) > 1:
+            raise ConfigError(f"call {call} mixes operators over {sorted(units)}; one call judges one kind of unit")
         config = project.config.calls.get(call, CallConfig())
-        llm.append(Group(name=call, kind="llm", instances=instances, evidence=config.evidence, model=config.model))
-    groups = [*code, *llm]
+        judged.append(Group(name=call, kind="judgment", instances=instances, evidence=config.evidence,
+                            model=config.model, unit=units.pop(), sample=config.sample, window=config.window,
+                            context=config.context, turns_per_call=config.turns_per_call, tail=config.tail))
+    groups = [*code, *judged]
     _check_names(groups)
     if only:
         missing = set(only) - {g.name for g in groups}
@@ -149,7 +220,7 @@ def load_groups(project: Project, only: list[str] | None = None) -> list[Group]:
 
 
 TRIAL = "mined-trial"
-"""Name of the group of LLM candidates a mining round extracts before deciding on them."""
+"""Name of the group of judged candidates a mining round extracts before deciding on them."""
 
 
 def trial_group(project: Project) -> Group | None:
@@ -157,7 +228,7 @@ def trial_group(project: Project) -> Group | None:
     if not project.trial_path.is_file():
         return None
     use = OperatorUse(use="llm.features", alias=TRIAL, params=json.loads(project.trial_path.read_text("utf-8")))
-    return Group(name=TRIAL, kind="llm", instances=[instantiate(discover(project)["llm.features"], use)],
+    return Group(name=TRIAL, kind="judgment", instances=[instantiate(discover(project)["llm.features"], use)],
                  evidence=True)
 
 
@@ -204,3 +275,6 @@ def _check_names(groups: list[Group]) -> None:
                     raise ConfigError(f"Feature {feature.name} comes from both {owners[feature.name]} and "
                                       f"{instance.id}; use `prefix` to rename one")
                 owners[feature.name] = instance.id
+        outputs = [f.name for f in group.unit_outputs]
+        if len(set(outputs)) != len(outputs):
+            raise ConfigError(f"Group {group.name} has two per-unit outputs of the same name; use `prefix`")

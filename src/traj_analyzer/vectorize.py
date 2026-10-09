@@ -5,9 +5,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from traj_analyzer.features.table import KEY, feature_values, read_group, status_column
 from traj_analyzer.ingest import IndexRow
+from traj_analyzer.layers.tables import table_path
 from traj_analyzer.operators.base import FeatureSpec
 from traj_analyzer.operators.catalog import Group
 from traj_analyzer.paths import PathTree
@@ -17,6 +19,10 @@ MAX_FREE_LABELS = 100
 """Columns for category, set and map features without labels: one per label, for the most frequent labels."""
 LABEL_TYPES = ("category", "set", "map", "paths")
 """Feature types whose distance columns are one per label, kept on their own scale of 0 to 1."""
+FIRST_UNRECOVERED = "first_unrecovered"
+"""Query columns derived from every event feature: the step and rule of the earliest event no action made up for."""
+ANOMALY_COLUMNS = ("batch", "stratum", "anomaly_score", "anomaly_rank")
+"""Query columns copied from the anomalies table when `traj anomalies` has run."""
 
 
 @dataclass
@@ -53,7 +59,7 @@ class Frame:
     def complete(self, features: list[str]) -> Frame:
         """Keep the trajectories that have a row for every one of `features` in the feature table.
 
-        A row counts even when its value is empty: the operator did not apply, the value was None, or the LLM call
+        A row counts even when its value is empty: the operator did not apply, the value was None, or the call
         was refused or failed.
         """
         unknown = sorted(set(features) - set(self.columns))
@@ -116,6 +122,8 @@ def build_frame(
     """Read the feature table as the last `traj extract` left it, for the given trajectories and enabled features.
 
     `directories` maps a group name to the directory holding its table, for groups kept outside the feature table.
+    The query view also carries the first unrecovered event of every trajectory and, once `traj anomalies` has run,
+    its batch, stratum, score and rank.
     """
     query: dict[str, pd.Series] = {}
     distance: dict[str, pd.Series] = {}
@@ -124,6 +132,7 @@ def build_frame(
     extracted: dict[str, set[str]] = {}
     paths: dict[str, pd.Series] = {}
     levels: dict[str, list[str]] = {}
+    events: dict[str, pd.Series] = {}
     support = project.config.sampling.path_support
     index = pd.Index([t.key for t in trajectories], name="key")
     wanted = set(index)
@@ -146,6 +155,11 @@ def build_frame(
             if feature.type == "paths":
                 paths[feature.name] = pd.Series(raw, dtype=object).reindex(index)
                 levels[feature.name] = list(feature.levels or ())
+            if feature.type == "event":
+                events[feature.name] = pd.Series(raw, dtype=object).reindex(index)
+    if events:
+        query.update(_first_unrecovered(events, index))
+    query.update(_anomaly_columns(project, index))
     return Frame(
         query=pd.DataFrame(query, index=index),
         distance=pd.DataFrame(distance, index=index),
@@ -155,6 +169,27 @@ def build_frame(
         paths=paths,
         levels=levels,
     )
+
+
+def _first_unrecovered(events: dict[str, pd.Series], index: pd.Index) -> dict[str, pd.Series]:
+    steps = pd.Series(np.nan, index=index, dtype=float)
+    rules = pd.Series(pd.NA, index=index, dtype="string")
+    for rule, series in events.items():
+        for key, value in series.items():
+            if not isinstance(value, list):
+                continue
+            open_steps = [event["step"] for event in value if not event["recovered"]]
+            if open_steps and (np.isnan(steps[key]) or min(open_steps) < steps[key]):
+                steps[key], rules[key] = float(min(open_steps)), rule
+    return {f"{FIRST_UNRECOVERED}_step": steps, f"{FIRST_UNRECOVERED}_rule": rules}
+
+
+def _anomaly_columns(project: Project, index: pd.Index) -> dict[str, pd.Series]:
+    path = table_path(project, "anomalies")
+    if not path.is_file():
+        return {}
+    table = pq.read_table(path, columns=[KEY, *ANOMALY_COLUMNS]).to_pandas().set_index(KEY)
+    return {name: table[name].reindex(index) for name in ANOMALY_COLUMNS}
 
 
 def _expand_paths(
@@ -223,6 +258,13 @@ def _expand(
                 for i in range(length)
             }
             return aggregates, {**curve, **aggregates}
+        case "event":
+            # An event feature counts as its events and as those no later action made up for.
+            count = series.map(lambda v: float(len(v)) if isinstance(v, list) else None)
+            unrecovered = series.map(lambda v: float(sum(not e["recovered"] for e in v)) if isinstance(v, list)
+                                     else None)
+            both = {name: count, f"{name}__unrecovered": unrecovered}
+            return both, both
     raise AssertionError(feature.type)
 
 

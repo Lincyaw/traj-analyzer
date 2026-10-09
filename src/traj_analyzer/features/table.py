@@ -17,6 +17,8 @@ Status = Literal["ok", "refused", "failed", "invalid_length"]
 
 KEY = "key"
 
+EVENT = pa.struct([("step", pa.int64()), ("end", pa.int64()), ("objects", pa.list_(pa.string())),
+                   ("recovered", pa.bool_()), ("recovered_at", pa.int64()), ("note", pa.string())])
 _ARROW = {
     "scalar": pa.float64(),
     "boolean": pa.bool_(),
@@ -25,6 +27,7 @@ _ARROW = {
     "vector": pa.list_(pa.float64()),
     "map": pa.map_(pa.string(), pa.float64()),
     "paths": pa.list_(pa.list_(pa.string())),
+    "event": pa.list_(EVENT),
 }
 
 
@@ -37,6 +40,9 @@ class FeatureRow:
     status: Status = "ok"
     detail: str | None = None
     """Why a value is missing: the operator does not apply, or the call was refused or failed."""
+    steps: tuple[int, ...] = ()
+    """Steps the value rests on, when the operator gives them; they go into the evidence table."""
+    note: str = ""
 
 
 def status_column(feature: str) -> str:

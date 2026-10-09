@@ -277,6 +277,26 @@ wheels = [
 ]
 
 [[package]]
+name = "libdash"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/f6/c2847c6dca2b67eaba363545794054d311b1eee5f90d6256f33a767d4656/libdash-0.5.2.tar.gz", hash = "sha256:62ff858052c449b393e69cd873bd2db974d100fd1d97dba4e892ccb122f089cb", size = 181749, upload-time = "2026-09-22T21:14:00.945Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/a9/a8b7b1449f7c7bfbe21fd3c0d7087a4d21d7cecffe7e8eddb802fa41cb92/libdash-0.5.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:fec70f3f705c7ab135246d0a00d74502d726fb90eb566500ba2d5af55b2282d0", size = 159948, upload-time = "2026-09-22T21:13:37.574Z" },
+    { url = "https://files.pythonhosted.org/packages/70/dd/bc861d0f081d051ac8f879521b3d23d3718d46a9e32f478118a4447f712c/libdash-0.5.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:076bb1070ae300eaaa1cc4790114d3b09d6e3984050f1d83cb906aef16364306", size = 280957, upload-time = "2026-09-22T21:13:38.609Z" },
+    { url = "https://files.pythonhosted.org/packages/34/40/58edfe83131ee109e393984a8ce556900c9d6d8f67eb97c06158cc909bca/libdash-0.5.2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:676a9eabb81463a524f255a9dc9fc810b29205a813adeb44edba276a59baefce", size = 271154, upload-time = "2026-09-22T21:13:40.125Z" },
+    { url = "https://files.pythonhosted.org/packages/63/4d/6da8c90c612b395e6682f1153e0e373f25f0ae28cca64d8be616be89a322/libdash-0.5.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:9f9956e61374287de6f0a4f325b8ee9226c539269e0600f7d80b3025cda1b2aa", size = 159937, upload-time = "2026-09-22T21:13:41.499Z" },
+    { url = "https://files.pythonhosted.org/packages/db/3b/99abe058ab513f7be1964ed07d7543ea6d1a8c957ebccf78037c12b5286e/libdash-0.5.2-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7171b7d3bd19399b51b134de8965f8b20d18e8800cc66976d514a8407b5e75e6", size = 280959, upload-time = "2026-09-22T21:13:42.632Z" },
+    { url = "https://files.pythonhosted.org/packages/62/83/546e5cdb68bd1106264cd49259db2f34c0544461d3ed7986581024448b86/libdash-0.5.2-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:6e9ed4e68cd45c00790ca6ffe82ca1502bd3594b66b43d6d702334ea7929dc33", size = 271155, upload-time = "2026-09-22T21:13:43.72Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/91/51a0fd08f54997248d3e27deb8fd8cdae287f0c2d1c654d93d80684132a7/libdash-0.5.2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:d26f5871549dc4eb27b347f4632bb7cf9ee8acb646d3663121e062fe045c9dec", size = 159951, upload-time = "2026-09-22T21:13:44.686Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/cd/8d5cc9481de08bb92bcecee98ca7713fbf64b3a71baa3fb01c849047dae3/libdash-0.5.2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:aa17a0c617e320295ab114a57fe67e8257084c730c5a2d1fbe78bea9d61b31f1", size = 280957, upload-time = "2026-09-22T21:13:46.236Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/50/d1b2291a9537078c117b0cf20f37cdc633f22e4e7d6e0a76fcdb191f7246/libdash-0.5.2-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:79570b7b88d12ef7175dd51f4faf611c336f2d645ea2e343a4108b873f51fefa", size = 271154, upload-time = "2026-09-22T21:13:50.024Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/59/167b4af09c20312b596596ad4b3a1d6a2ae60450b3507b314997251d22d3/libdash-0.5.2-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:aa70f11f0ab6e007f0e84dbfc230054ffa88de0630dd543ef660b6d9d78336ab", size = 159941, upload-time = "2026-09-22T21:13:51.309Z" },
+    { url = "https://files.pythonhosted.org/packages/63/72/77c691c8168d7c1633bf5030fe420d08b68caa4b27cbe79e2a10b880e6a4/libdash-0.5.2-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2796c41b9a082eb91102f45d05f946036ec93354773edb44757a9fbc25f8ffe0", size = 280958, upload-time = "2026-09-22T21:13:52.376Z" },
+    { url = "https://files.pythonhosted.org/packages/27/8f/31b4d329690f2b86bcfbed0309de72481e4af904303cc4c7606566ae7218/libdash-0.5.2-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:8b06661d716df16cde08cb2ba381cbd0acd2544a8750d2ae7b84c003c96be582", size = 271154, upload-time = "2026-09-22T21:13:53.492Z" },
+]
+
+[[package]]
 name = "markdown-it-py"
 version = "4.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -722,6 +742,11 @@ wheels = [
 ]
 
 [[package]]
+name = "shasta"
+version = "0.5"
+source = { git = "https://github.com/binpash/shasta#3ec173d6dc96e9007f5b582634f9315eafcac867" }
+
+[[package]]
 name = "shellingham"
 version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
@@ -787,12 +812,15 @@ dependencies = [
     { name = "aifn", extra = ["deepseek"] },
     { name = "duckdb" },
     { name = "fastapi" },
+    { name = "libdash" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "ruamel-yaml" },
     { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "shasta" },
     { name = "sqlglot" },
     { name = "typer" },
     { name = "uvicorn" },
@@ -810,12 +838,15 @@ requires-dist = [
     { name = "aifn", extras = ["deepseek"], git = "https://github.com/Lincyaw/aifn" },
     { name = "duckdb", specifier = ">=1.5.5" },
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "libdash", specifier = ">=0.5.0" },
     { name = "numpy", specifier = ">=2.5.3" },
     { name = "pandas", specifier = ">=3.0.6" },
     { name = "pyarrow", specifier = ">=25.0.1" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "ruamel-yaml", specifier = ">=0.19.1" },
     { name = "scikit-learn", specifier = ">=1.9.1" },
+    { name = "scipy", specifier = ">=1.18.1" },
+    { name = "shasta", git = "https://github.com/binpash/shasta" },
     { name = "sqlglot", specifier = ">=30.19" },
     { name = "typer", specifier = ">=0.27.2" },
     { name = "uvicorn", specifier = ">=0.54.0" },

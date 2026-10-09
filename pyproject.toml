@@ -11,12 +11,15 @@ dependencies = [
     "aifn[deepseek]",
     "duckdb>=1.5.5",
     "fastapi>=0.141.1",
+    "libdash>=0.5.0",
     "numpy>=2.5.3",
     "pandas>=3.0.6",
     "pyarrow>=25.0.1",
     "pydantic>=2.13.5",
     "ruamel-yaml>=0.19.1",
     "scikit-learn>=1.9.1",
+    "scipy>=1.18.1",
+    "shasta",
     "sqlglot>=30.19",
     "typer>=0.27.2",
     "uvicorn>=0.54.0",
@@ -31,6 +34,10 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 aifn = { git = "https://github.com/Lincyaw/aifn" }
+shasta = { git = "https://github.com/binpash/shasta" }
+
+[tool.uv.extra-build-dependencies]
+shasta = ["setuptools"]
 
 [dependency-groups]
 dev = [

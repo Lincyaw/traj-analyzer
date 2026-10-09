@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from traj_analyzer.layers.tables import Tables
 from traj_analyzer.operators.base import FeatureSpec, Operator
 from traj_analyzer.schema import Trajectory
 
@@ -54,7 +55,7 @@ def _convert(spec: MetaField, value: Any) -> Any:
             return {str(k): float(v) for k, v in value.items()}
 
 
-def compute(trajectory: Trajectory, params: Params) -> dict[str, Any]:
+def compute(trajectory: Trajectory, tables: Tables, params: Params) -> dict[str, Any]:
     values = {}
     for name, spec in params.fields.items():
         if spec.key not in trajectory.metadata and spec.required:

@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from traj_analyzer.features.table import KEY, read_group, status_column
 from traj_analyzer.ingest import load_index
+from traj_analyzer.layers.tables import description, read_table, table_names
 from traj_analyzer.operators.base import FeatureSpec
 from traj_analyzer.operators.catalog import Group, load_groups
 from traj_analyzer.project import Project
@@ -50,15 +51,24 @@ class Database:
         joins = [f"LEFT JOIN groups.{_quote(g.name)} AS {_quote(g.name)} USING ({KEY})" for g in groups]
         self.connection.execute(f"CREATE VIEW {FEATURES} AS SELECT {', '.join(['trajectories.*', *values])} "
                                 f"FROM trajectories {' '.join(joins)}")
+        self.connection.execute("CREATE SCHEMA tables")
+        stored = {name: read_table(project, name) for name in table_names(project)}
+        for name, table in stored.items():
+            self._load(f"tables.{_quote(name)}", table)
         self.connection.execute("SET enable_external_access = false")
         self.connection.execute("SET lock_configuration = true")
         self.notes = {KEY: "Trajectory key: <dataset>/<id>.", "dataset": "Dataset the trajectory was ingested into."}
         for group in groups:
             for feature in group.features:
                 self.notes.update(_notes(group, feature))
+        for table in stored.values():
+            for field_ in table.schema:
+                self.notes.setdefault(field_.name, description(field_))
         self.sources = {FEATURES: self._source(FEATURES, FEATURES)}
         for group in groups:
             self.sources[group.name] = self._source(group.name, f"groups.{_quote(group.name)}")
+        for name in stored:
+            self.sources[f"tables.{name}"] = self._source(f"tables.{name}", f"tables.{_quote(name)}")
 
     def _load(self, sql_name: str, table: pa.Table) -> None:
         self.connection.register("incoming", table)
@@ -155,7 +165,7 @@ def create_app(project: Project) -> FastAPI:
     @app.get("/api/tables")
     def tables() -> list[dict[str, Any]]:
         return [{"name": s.name, "rows": s.rows,
-                 "columns": [{"name": n, "type": t, "note": database.notes[n]} for n, t in s.columns.items()]}
+                 "columns": [{"name": n, "type": t, "note": database.notes.get(n, "")} for n, t in s.columns.items()]}
                 for s in database.sources.values()]
 
     @app.post("/api/rows")

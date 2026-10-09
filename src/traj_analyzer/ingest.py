@@ -120,6 +120,73 @@ def render_markdown(trajectory: Trajectory, render: RenderConfig, description: s
     return "\n".join(header) + "\n" + "\n".join(body), len(chunks)
 
 
+def turn_units(trajectory: Trajectory) -> list[tuple[int, int]]:
+    """The turns of the user: from each message the user typed to the step before the next one."""
+    starts = [step.index for step in trajectory.steps if step.is_user_message]
+    if not starts:
+        return []
+    last = trajectory.steps[-1].index
+    return [(start, (starts[i + 1] - 1) if i + 1 < len(starts) else last) for i, start in enumerate(starts)]
+
+
+def window_units(trajectory: Trajectory, steps: int, stride: int) -> list[tuple[int, int]]:
+    """Windows of `steps` steps every `stride` steps, the last one ending at the last step."""
+    indexes = [step.index for step in trajectory.steps]
+    if not indexes:
+        return []
+    if len(indexes) <= steps:
+        return [(indexes[0], indexes[-1])]
+    starts = list(range(0, len(indexes) - steps + 1, stride))
+    if starts[-1] != len(indexes) - steps:
+        starts.append(len(indexes) - steps)
+    return [(indexes[start], indexes[start + steps - 1]) for start in starts]
+
+
+def _header(trajectory: Trajectory, title: str, render: RenderConfig, description: str) -> list[str]:
+    header = [f"# {trajectory.key} {title}", ""]
+    if description:
+        header += [description.strip(), ""]
+    shown = {k: v for k, v in trajectory.metadata.items()
+             if not any(fnmatch.fnmatchcase(k, pattern) for pattern in render.hide_metadata)}
+    if shown:
+        header += ["```json", json.dumps(shown, ensure_ascii=False, indent=1), "```", ""]
+    return header
+
+
+def render_window(trajectory: Trajectory, start: int, end: int, render: RenderConfig, description: str = "") -> str:
+    """Render one window of a trajectory: the last message the user typed before or inside it, then its steps."""
+    header = _header(trajectory, f"steps #{start} to #{end}", render, description)
+    request = next((step for step in reversed(trajectory.steps) if step.is_user_message and step.index <= end), None)
+    body = ["## Request", ""]
+    body.append(_render_step(request, render.max_step_chars) if request is not None else "No message from the user.\n")
+    body += ["## Steps", "", "<!-- chunk 0 -->", ""]
+    body += [_render_step(step, render.max_step_chars) for step in trajectory.steps if start <= step.index <= end]
+    return "\n".join(header) + "\n" + "\n".join(body)
+
+
+def render_turns(
+    trajectory: Trajectory, units: list[tuple[int, int]], before: int, render: RenderConfig, description: str = "",
+    first: int = 0,
+) -> str:
+    """Render turns of a trajectory for a call that judges every message the user typed: per turn, the `before`
+    steps preceding the message, which show what the assistant did last, and the message itself.
+
+    `first` numbers the turns when the file holds a part of them.
+    """
+    header = _header(trajectory, f"turns {first} to {first + len(units) - 1} of the user", render, description)
+    by_index = {step.index: step for step in trajectory.steps}
+    body = ["<!-- chunk 0 -->", ""]
+    for number, (start, end) in enumerate(units, start=first):
+        body += [f"## Turn {number}: steps #{start} to #{end}", ""]
+        shown = [by_index[index] for index in range(max(0, start - before), start) if index in by_index]
+        if shown:
+            body += ["### Before the message", ""]
+            body += [_render_step(step, render.max_step_chars) for step in shown]
+        body += ["### The message", ""]
+        body.append(_render_step(by_index[start], render.max_step_chars))
+    return "\n".join(header) + "\n" + "\n".join(body)
+
+
 def _render_step(step: Step, limit: int) -> str:
     title = f"### #{step.index} {step.role} · {step.kind}"
     if step.name:
