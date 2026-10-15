@@ -4,11 +4,11 @@ import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import duckdb
 import pyarrow as pa
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.staticfiles import StaticFiles
 
 from traj_analyzer.features.table import KEY, read_group, status_column
@@ -18,11 +18,9 @@ from traj_analyzer.operators.base import FeatureSpec
 from traj_analyzer.operators.catalog import Group, load_groups
 from traj_analyzer.project import Project
 from traj_analyzer.viewer.analysis import AnalysisRequest, ProfileRequest, arrow_response, profile
-from traj_analyzer.viewer.query import QueryRequest, RowsRequest
+from traj_analyzer.viewer.query import FEATURES, QueryRequest, RowsRequest
 from traj_analyzer.viewer.query import quote as _quote
-
-FEATURES = "features"
-"""The table joining the values of every extracted group on the trajectory key."""
+from traj_analyzer.viewer.review import Review, TrajectoriesRequest, VerdictRequest
 
 STATIC = Path(__file__).parent / "static"
 
@@ -37,43 +35,49 @@ class Source:
 
 
 class Database:
-    """An in-memory DuckDB holding the index and every extracted group, with file access switched off afterwards."""
+    """An in-memory DuckDB holding the index, every extracted group and every table of the project.
+
+    `lock` switches file access off once everything that needs it is loaded.
+    """
 
     def __init__(self, project: Project) -> None:
         self.connection = duckdb.connect()
         index = load_index(project)
-        self._load("trajectories", pa.table({KEY: [r.key for r in index], "dataset": [r.dataset for r in index]}))
+        self.load("trajectories", pa.table({KEY: [r.key for r in index], "dataset": [r.dataset for r in index]}))
         self.connection.execute("CREATE SCHEMA groups")
-        groups = [g for g in load_groups(project) if (project.table_dir / f"{g.name}.parquet").is_file()]
-        for group in groups:
-            self._load(f"groups.{_quote(group.name)}", read_group(project, group))
-        values = [f"{_quote(g.name)}.{_quote(f.name)}" for g in groups for f in g.features]
-        joins = [f"LEFT JOIN groups.{_quote(g.name)} AS {_quote(g.name)} USING ({KEY})" for g in groups]
+        self.groups = [g for g in load_groups(project) if (project.table_dir / f"{g.name}.parquet").is_file()]
+        for group in self.groups:
+            self.load(f"groups.{_quote(group.name)}", read_group(project, group))
+        values = [f"{_quote(g.name)}.{_quote(f.name)}" for g in self.groups for f in g.features]
+        joins = [f"LEFT JOIN groups.{_quote(g.name)} AS {_quote(g.name)} USING ({KEY})" for g in self.groups]
         self.connection.execute(f"CREATE VIEW {FEATURES} AS SELECT {', '.join(['trajectories.*', *values])} "
                                 f"FROM trajectories {' '.join(joins)}")
         self.connection.execute("CREATE SCHEMA tables")
         stored = {name: read_table(project, name) for name in table_names(project)}
+        self.stored = list(stored)
         for name, table in stored.items():
-            self._load(f"tables.{_quote(name)}", table)
-        self.connection.execute("SET enable_external_access = false")
-        self.connection.execute("SET lock_configuration = true")
+            self.load(f"tables.{_quote(name)}", table)
         self.notes = {KEY: "Trajectory key: <dataset>/<id>.", "dataset": "Dataset the trajectory was ingested into."}
-        for group in groups:
+        for group in self.groups:
             for feature in group.features:
                 self.notes.update(_notes(group, feature))
         for table in stored.values():
             for field_ in table.schema:
                 self.notes.setdefault(field_.name, description(field_))
         self.sources = {FEATURES: self._source(FEATURES, FEATURES)}
-        for group in groups:
+        for group in self.groups:
             self.sources[group.name] = self._source(group.name, f"groups.{_quote(group.name)}")
         for name in stored:
             self.sources[f"tables.{name}"] = self._source(f"tables.{name}", f"tables.{_quote(name)}")
 
-    def _load(self, sql_name: str, table: pa.Table) -> None:
+    def load(self, sql_name: str, table: pa.Table) -> None:
         self.connection.register("incoming", table)
         self.connection.execute(f"CREATE TABLE {sql_name} AS SELECT * FROM incoming")
         self.connection.unregister("incoming")
+
+    def lock(self) -> None:
+        self.connection.execute("SET enable_external_access = false")
+        self.connection.execute("SET lock_configuration = true")
 
     def _source(self, name: str, sql: str) -> Source:
         columns = {row[0]: row[1] for row in self.connection.execute(f"DESCRIBE {sql}").fetchall()}
@@ -149,6 +153,8 @@ def _notes(group: Group, feature: FeatureSpec) -> dict[str, str]:
 
 def create_app(project: Project) -> FastAPI:
     database = Database(project)
+    review = Review(project, database)
+    database.lock()
     app = FastAPI(title="traj viewer")
 
     @app.middleware("http")
@@ -160,7 +166,8 @@ def create_app(project: Project) -> FastAPI:
 
     @app.get("/api/project")
     def project_info() -> dict[str, Any]:
-        return {"name": project.root.name, "root": str(project.root)}
+        return {"name": project.root.name, "root": str(project.root), "batches": project.config.batches,
+                "strata": project.config.strata}
 
     @app.get("/api/tables")
     def tables() -> list[dict[str, Any]]:
@@ -179,6 +186,38 @@ def create_app(project: Project) -> FastAPI:
     @app.post("/api/profile")
     def feature_profile(request: ProfileRequest) -> dict[str, Any]:
         return profile(database, request)
+
+    @app.get("/api/review/groupings")
+    def groupings() -> list[dict[str, Any]]:
+        return review.groupings()
+
+    @app.get("/api/review/overview")
+    def overview(by: Annotated[list[str] | None, Query()] = None) -> dict[str, Any]:
+        return review.overview(by)
+
+    @app.get("/api/review/filters")
+    def filters() -> dict[str, Any]:
+        return review.filters()
+
+    @app.post("/api/review/trajectories")
+    def trajectories(request: TrajectoriesRequest) -> dict[str, Any]:
+        return review.trajectories(request)
+
+    @app.get("/api/review/trajectory")
+    def trajectory(key: str) -> dict[str, Any]:
+        return review.trajectory(key)
+
+    @app.get("/api/review/steps")
+    def steps(key: str, start: int, end: int) -> list[dict[str, Any]]:
+        return review.steps(key, start, end)
+
+    @app.post("/api/review/verdict")
+    def verdict(request: VerdictRequest) -> dict[str, Any]:
+        return review.verdict(request)
+
+    @app.get("/api/review/features")
+    def features() -> list[dict[str, Any]]:
+        return review.feature_cards()
 
     app.mount("/", StaticFiles(directory=STATIC, html=True))
     return app

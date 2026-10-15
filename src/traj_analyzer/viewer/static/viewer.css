@@ -186,6 +186,19 @@ button:disabled, select:disabled {
   font-weight: 500;
 }
 
+a.logo {
+  text-decoration: none;
+}
+
+.back {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.back:hover {
+  color: var(--accent);
+}
+
 .tables {
   display: flex;
   gap: 4px;

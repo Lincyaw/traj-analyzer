@@ -54,10 +54,9 @@ Launch either agent in the analysis project to define features or write reports.
 `traj mine` finds new features: agents describe the scenario of the data, reason from it to measures and expectations that may matter, test those hypotheses against the trajectories and their tables, write the findings as features or event rules and review them; each candidate is then checked for noise, for how its values spread over the batches, and for whether its tail is worth a look, and the accepted ones are enabled.
 Both need `evaluation.model` in `traj.yaml`, a second model that measures judgment features again; the "Feature evaluation and mining" section of the design describes them.
 
-`traj view` serves an interactive analysis page at http://127.0.0.1:8000.
-Select features and grouping columns, then configure charts, aggregates, filters, expressions and multiple panels in the embedded Perspective viewer.
-The Rows mode retains the searchable feature table and every table of `.traj/tables/`: the actions, the events, the evidence, the judgments, the shifts and the anomalies.
-See [Interactive analysis](docs/viewer.md) for label analysis, saved views and data limits.
+`traj view` serves the review pages at http://127.0.0.1:8000: the batches with their oversight metrics and the features that moved, the trajectories most anomalous first with one line saying why, one trajectory's course turn by turn with its steps and the reasons it stands out, and the features with how they hold up; verdicts recorded there go to `reviews/verdicts.jsonl`.
+The `Data` page keeps the searchable tables and the Perspective charts for other analyses.
+See [Interactive analysis](docs/viewer.md) for the pages, saved views and data limits.
 `traj table` and `traj query` print CSV to stdout, and every other command except `traj view` prints JSON.
 Exit codes: 0 success, 1 runtime error, 2 usage or configuration error.
 

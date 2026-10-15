@@ -4,6 +4,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+FEATURES = "features"
+"""The table joining the values of every extracted group on the trajectory key."""
+
 
 class Sorter(BaseModel):
     model_config = ConfigDict(extra="forbid")
