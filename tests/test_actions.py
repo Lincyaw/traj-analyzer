@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 
 from test_pipeline import DATA, TOUCAN
@@ -98,6 +99,18 @@ def test_classify_reads_results() -> None:
     assert classify("[Request interrupted by user for tool use]", "shell", None, CLAUDE) == ("interrupted", None)
     sibling = "<tool_use_error>Sibling tool call errored</tool_use_error>"
     assert classify(sibling, "read", True, CLAUDE) == ("error", "sibling")
+
+
+def test_classify_reads_an_exit_code_the_profile_places_at_the_end() -> None:
+    closing = Harness(name="closing", closing_exit_code=re.compile(r"\[Command finished with exit code (-?\d+)\]$"))
+    output = "row\n" * 300
+    assert classify(f"{output}[Command finished with exit code 2]", "run", None, closing) == ("error", "exit")
+    assert classify(f"{output}[Command finished with exit code 124]", "run", None, closing) == ("error", "timeout")
+    assert classify(f"{output}[Command finished with exit code 0]", "run", None, closing) == ("ok", None)
+    # A mark inside the output is no exit code of the command.
+    quoted = f"[Command finished with exit code 1]\n{output}[Command finished with exit code 0]"
+    assert classify(quoted, "run", None, closing) == ("ok", None)
+    assert classify(f"{output}[Command finished with exit code 2]", "run", None, CLAUDE) == ("ok", None)
 
 
 def test_roles_and_root() -> None:

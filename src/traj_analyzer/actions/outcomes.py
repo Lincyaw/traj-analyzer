@@ -17,7 +17,8 @@ FLAGGED: tuple[ErrorClass, ...] = ("precondition", "mismatch", "not_found", "per
 def classify(
     result: str | None, act: str, is_error: bool | None, harness: Harness
 ) -> tuple[Outcome, ErrorClass | None]:
-    """How the result reads under the harness's profile; only its opening counts.
+    """How the result reads under the harness's profile; only its opening counts, and its closing characters for an
+    exit code the profile reads there.
 
     Under an empty profile a result is unanswered when missing, a failure of unknown class when the adapter
     flagged it, empty when it holds no text, and ok otherwise.
@@ -36,6 +37,8 @@ def classify(
     if _has(opening, marks.get("sibling", ())):
         return "error", "sibling"
     exit_code = harness.exit_code.search(opening) if harness.exit_code is not None else None
+    if exit_code is None and harness.closing_exit_code is not None:
+        exit_code = harness.closing_exit_code.search(text[-OPENING:])
     if exit_code is not None and exit_code.group(1) != "0":
         return "error", _exit_class(int(exit_code.group(1)), text, act, harness)
     if _has(opening, harness.error_openings):

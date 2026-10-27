@@ -35,7 +35,7 @@ The work splits into two layers:
 | Layer | Responsibility | Form |
 |---|---|---|
 | `traj` CLI | ingest, render, chunk, run the parsing layers, manage operators, schedule extraction, store, vectorize, detect anomalies, sample, mine, hunt | Python package with deterministic steps, a typer application |
-| Shared agent skills | write operators, read samples, write reports, feed findings back into operators and config | `.claude/skills/` holds the content, `.agents/skills/` links to it for Codex; both are installed by `traj init` |
+| Shared agent skills | write operators, read samples, write reports, feed findings back into operators and config, run hunts step by step | `.claude/skills/` holds the content, `.agents/skills/` links to it for Codex; both are installed by `traj init` |
 
 Three kinds of computation differ in cost, and the configuration keeps each where it belongs:
 
@@ -43,7 +43,7 @@ Three kinds of computation differ in cost, and the configuration keeps each wher
 |---|---|---|
 | code | an operator that reads the trajectory and its tables | every trajectory, on every `traj extract` |
 | judgment | one model call with a structured answer, no tools, over a trajectory, every turn of it, or one window | every trajectory, or a sample per batch, or the trajectories inside a scope |
-| function | a multi-step aifn agent with a workspace and a shell | once per scenario in `traj mine`, and a few calls per candidate for the tail check; one proposal and the reading calls of every round of `traj hunt` |
+| function | a multi-step aifn agent with a workspace and a shell | once per scenario in `traj mine`, and a few calls per candidate for the tail check; one proposal and the reading calls of every round of `traj hunt run` |
 
 The skills are written once, in `.claude/skills/` of the tool repository.
 The project template `src/traj_analyzer/templates/project/claude/skills/` holds a symbolic link to each skill file, so the package ships their content, and a new skill file needs a link there as well.
@@ -83,7 +83,7 @@ An analysis project is a git repository created by `traj init <dir>`:
 | `.traj/evaluation/` | second measurements per group and `features.json`, the result of `traj evaluate` | no |
 | `.traj/mining/<round>/` | the workspace, trial values and `report.json` of one mining round | no |
 | `.traj/mining/scenario.md` | what the trajectories are, as the last finished mining round described it | no |
-| `.traj/hunts/<name>/<run>/` | the workspace, the state after every round, the clusters and `report.json` of one run of a hunt | no |
+| `.traj/hunts/<name>/<run>/` | the workspace, the state after every round, the clusters, `pending.json` while a round of an agent session waits for its verdicts, and `report.json` of one run of a hunt | no |
 
 `traj mine` writes the code operators it accepts to `operators/mined/<name>.py` and the judgment features it accepts to `traj.yaml`, so they are in git like every other operator.
 
@@ -584,7 +584,8 @@ The `traj-report` skill guides Codex or Claude Code through these steps:
 | `traj tree <feature> [--dataset d] [--support s] [--by c] [--within c] [--top n]` | show a paths feature as a tree: the size of every level, where events are cut, and the most used nodes |
 | `traj evaluate [--workers n]` | measure noise, variation and dependence of every enabled feature, assign roles, report drift of the trajectories outside the reference set, and with labels declared, check the signals and the anomalies against them (section 17) |
 | `traj mine [--rounds n] [--workers n]` | describe the scenario, propose and test hypotheses about measures and expectations, check the resulting features, check their tails, and write the accepted ones to `operators/mined/` and `traj.yaml` |
-| `traj hunt <name> [--max-rounds n] [--workers n]` | search the trajectories for what `hunts/<name>.yaml` asks for: propose probes, read what they hit and a sample of what they miss, and refine them until `patience` rounds in a row find nothing new; write the findings and keep the probes (section 18) |
+| `traj hunt run <name> [--max-rounds n] [--workers n]` | search the trajectories for what `hunts/<name>.yaml` asks for with aifn functions: propose probes, read what they hit and a sample of what they miss, and refine them until `patience` rounds in a row find nothing new; write the findings and keep the probes (section 18) |
+| `traj hunt start\|status\|propose\|verdicts\|close <name>` | the same search step by step, with an agent session proposing the probes and reading the cases (section 18.8) |
 | `traj try <file> [--key k]...` | compute a code operator file on the reference set and print how its values spread, the objection of the checks, and the value and evidence steps for every `--key`; changes nothing |
 | `traj review <key> --feature <name> [--step n] --worth\|--no-worth [--note text]` | record what a person found on a trajectory a feature pointed to, in `reviews/verdicts.jsonl`, and print the feature's human precision so far (section 16) |
 
@@ -975,13 +976,14 @@ A shell call holds one action per simple command, and every one of them carries 
 The error class of a failed command follows its act, so a failing `pytest` reads as test_failed and a failing `make` as build_failed.
 
 The result of a call is text, and `classify` reads only its opening, with the marks of the profile: a rejection by the user, an interruption, a hook's denial, a sibling's failure, an exit code, an error opening such as `<tool_use_error>`, and the empty results.
+A profile whose harness reports the exit code after the output, such as `[Command finished with exit code 1]`, reads it in the closing characters of the result instead.
 A release without an error flag, such as SWE-chat, is classified from the text alone; a project whose adapter sets `is_error` passes it, and a result the profile does not recognise reads as ok.
 
 The `actions` layer of section 14 runs the component on every trajectory and writes its actions and relations as tables; `stats.actions` and `events.generic` read them.
 
 ### 13.1 Harness profiles
 
-A harness profile is a `traj_analyzer.harness.Harness`: the tool names of the harness by what a call does and the openings of the names of its MCP tools; the argument keys that hold the command, the path, the pattern, the working directory, the new text, the agent, the skill, the URL and the patch; the patterns of a shell wrapper, of patch file headers and of an exit code; the openings of rejected, interrupted, cached and empty results; the openings that make a result a failure; and the marks of each error class.
+A harness profile is a `traj_analyzer.harness.Harness`: the tool names of the harness by what a call does and the openings of the names of its MCP tools; the argument keys that hold the command, the path, the pattern, the working directory, the new text, the agent, the skill, the URL and the patch; the patterns of a shell wrapper, of patch file headers, of an exit code in the opening of a result and of one at its end; the openings of rejected, interrupted, cached and empty results; the openings that make a result a failure; and the marks of each error class.
 A profile is a file `<name>.py` that defines `HARNESS`, a `Harness` named after the file.
 Built-in profiles live in `traj_analyzer/harness/library/`, project profiles in `harness/` of the analysis project, and a project profile overrides a built-in profile of the same name; `merged` builds a profile from another one and the tables it adds.
 The adapter names the harness in `Trajectory.harness`, and the layers run with the profile of that name; a name without a profile stops with a configuration error.
@@ -1120,7 +1122,7 @@ These numbers check that the signals, the rules and the anomaly score are worth 
 A hunt looks for every trajectory that shows what a person asks for, such as an agent that makes a check pass without doing the task, or one that runs destructive commands nobody asked for.
 Features describe how batches differ, and the checks of mining keep a feature only when enough trajectories vary on it and no single project or model explains it, so a behaviour that a few trajectories show, or that one model shows, is rejected there.
 A hunt is judged by the trajectories it finds and by how many it may still miss.
-`traj hunt <name>` runs one, in the package `traj_analyzer/hunting/`.
+`traj hunt run <name>` runs one with aifn functions, and an agent session runs one step by step (section 18.8), in the package `traj_analyzer/hunting/`.
 
 ### 18.1 The hunt file
 
@@ -1227,7 +1229,36 @@ A run without `report.json` continues from its last state when the hunt runs aga
 
 A proposal that runs again because the one before was stopped before it submitted starts without its notes and without the operator files the driver did not place.
 
-### 18.8 Limits
+### 18.8 Agent sessions
+
+`traj hunt run <name>` plays the two roles of a round with the aifn functions `hunt-propose` and `hunt-verify`.
+An agent session, such as Claude Code or Codex following the skill `traj-hunt`, plays them itself, and a run moves one step at a time:
+
+| Command | What it does |
+|---|---|
+| `traj hunt start <name>` | starts a run, or continues the one in progress: prepares the workspace and writes what the proposal of the next round reads |
+| `traj hunt propose <name>` | takes the proposal the session wrote, checks it against the output model of `hunt-propose`, runs the probes, retires the unproductive ones, draws the reads, writes the cases, and keeps the round as pending in `pending.json` of the run |
+| `traj hunt verdicts <name>` | takes the verdicts of every group of cases, checks each against the output model of `hunt-verify`, records the round, and writes what the next proposal reads; after the closing check, it finishes the run as section 18.6 says |
+| `traj hunt close <name>` | when the search has ended, writes the cases of the closing check, or finishes the run when the check reads nothing |
+| `traj hunt status <name>` | the phase of the run (propose, verdicts, close or finished), the files of the next step, and the command that takes it |
+
+The files a session reads and writes, relative to the workspace:
+
+| Path | Content |
+|---|---|
+| `rounds/<round>/propose.md` | the instruction of `hunt-propose`, naming `rounds/<round>/input.json` as its request, with where to write the answer |
+| `rounds/<round>/input.json` | the request a call of `hunt-propose` would get: the digests of the files the proposal builds on |
+| `rounds/<round>/proposal.json`, `proposal.schema.json` | the proposal the session writes, and the JSON Schema of the output model it is checked against |
+| `rounds/<round>/batches/<k>.md`, `batches/<k>.json` | per group of `cases_per_call` cases, the instruction of `hunt-verify` naming the group's file, and the file holding its cases |
+| `rounds/<round>/answers/<k>.json`, `verify.schema.json` | the verdicts of a group, and the JSON Schema of the output model they are checked against |
+
+The closing check uses `rounds/final/` the same way.
+A session hands in more strictly than a function returns: an answer that does not fit its schema, gives verdicts for other files than its group holds, leaves a case without a verdict, or names a facet `facets.json` lacks is refused with the error, and the round stays pending until a corrected answer is handed in.
+Everything else is the code of section 18.3 to 18.6, so the same answers give the same run either way; the tests hand in the recorded answers of a real run step by step and compare the report, the state of every round, the kept probes and the findings table with those of the replayed run.
+A session's calls are not cached in the mailbox: a run continues from `traj hunt status`, and a step taken again is answered again.
+The skill has every group read by a subagent started for it alone, with the instruction and nothing of the session's reasoning, so that a reader cannot confirm what the proposer expected.
+
+### 18.9 Limits
 
 - One model gives every verdict, and a trajectory read once is not read again in the run, so a verdict given before a facet existed stays as it was.
 - The miss bound covers the trajectories no probe hits; a real trajectory among the hits of a probe is counted by the probe's precision, which rests on the hits read.

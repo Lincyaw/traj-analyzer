@@ -7,7 +7,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 import pytest
-from aifn import Worker
+from aifn import Call, Worker
 from aifn.engines import ReplayEngine
 from pydantic import ValidationError
 from ruamel.yaml import YAML
@@ -15,9 +15,8 @@ from test_mining import call_key
 from test_pipeline import DATA, TOUCAN, ULTRACHAT, ULTRACHAT_DESCRIPTION, edit_config
 
 from traj_analyzer.adapters.messages import MessagesAdapter
-from traj_analyzer.calls import WorkspaceCalls
 from traj_analyzer.cli import main
-from traj_analyzer.extract import SubprocessWorkers, extract
+from traj_analyzer.extract import extract
 from traj_analyzer.hunting import FINDINGS_TABLE, hunt, load_hunt
 from traj_analyzer.hunting.draw import apportion, clusters_of, draw
 from traj_analyzer.hunting.driver import apply, keep_probes, start, write_findings
@@ -27,9 +26,9 @@ from traj_analyzer.hunting.functions import (
     Facet,
     Probe,
     Proposal,
+    ProposeRequest,
     Verification,
     functions,
-    hunt_functions,
     proposal_model,
 )
 from traj_analyzer.hunting.ledger import (
@@ -42,7 +41,8 @@ from traj_analyzer.hunting.ledger import (
     unproductive,
 )
 from traj_analyzer.hunting.probes import run_probes
-from traj_analyzer.hunting.workspace import prepare, write_case
+from traj_analyzer.hunting.steps import close_hunt, start_hunt, status, submit_proposal, submit_verdicts
+from traj_analyzer.hunting.workspace import prepare, write_case, write_file
 from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.operators.catalog import load_groups
 from traj_analyzer.project import ConfigError, Project
@@ -97,11 +97,12 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
     return project
 
 
-def workspace_calls(project: Project, workspace: Path) -> WorkspaceCalls:
-    spec = load_hunt(project, "misuse")
-    box = mailbox(project)
-    return WorkspaceCalls(project=project, runner=SubprocessWorkers(), workers=None, box=box, known={},
-                          functions=hunt_functions(project, "misuse", spec), workspace=workspace)
+def prepared(project: Project, workspace: Path) -> list[str]:
+    """Prepare a hunt workspace over every trajectory of the project, and return their keys."""
+    keys = [row.key for row in load_index(project)]
+    written = prepare(project, workspace, load_hunt(project, "misuse"), keys)
+    assert {"need.md", "README.md", "operators/rules.py"} <= written
+    return keys
 
 
 def frame_of(project: Project) -> tuple[list[str], Matrix]:
@@ -153,10 +154,8 @@ def test_every_hunt_declares_its_functions_for_the_workers(project: Project) -> 
 
 
 def test_workspace_holds_the_tables_and_the_whole_text(project: Project, tmp_path: Path) -> None:
-    calls = workspace_calls(project, tmp_path / "ws")
-    keys = [row.key for row in load_index(project)]
-    prepare(calls, load_hunt(project, "misuse"), keys)
-    workspace = calls.workspace
+    workspace = tmp_path / "ws"
+    prepared(project, workspace)
     assert (workspace / "need.md").read_text(encoding="utf-8").strip() == NEED
     assert len(list((workspace / "trajectories").glob("*/*.md"))) == 70
     for name in ("README.md", "query.py", "operators/rules.py", "operators/example_operator.py"):
@@ -169,7 +168,7 @@ def test_workspace_holds_the_tables_and_the_whole_text(project: Project, tmp_pat
     cut = steps[(steps["key"] == key) & (steps["step"] == 9)].iloc[0]
     whole = contents[(contents["key"] == key) & (contents["step"] == 9)].iloc[0]
     assert (cut["chars"], len(cut["content"]), len(whole["content"])) == (26177, 4000, 26177)
-    case = write_case(calls, "rounds/1/cases", key)
+    case = write_case(project, workspace, "rounds/1/cases", key)
     assert case == f"rounds/1/cases/{key}.md"
     text = (workspace / case).read_text(encoding="utf-8")
     assert whole["content"] in text and "truncated" not in text
@@ -180,9 +179,8 @@ def test_workspace_holds_the_tables_and_the_whole_text(project: Project, tmp_pat
 
 
 def test_sql_and_code_probes_find_the_same_positions(project: Project, tmp_path: Path) -> None:
-    calls = workspace_calls(project, tmp_path / "ws")
-    keys = [row.key for row in load_index(project)]
-    prepare(calls, load_hunt(project, "misuse"), keys)
+    workspace = tmp_path / "ws"
+    keys = prepared(project, workspace)
     code = (DATA / "hunting" / "weather_calls.py").read_text(encoding="utf-8")
     probes = [
         probe("weather_sql"),
@@ -194,8 +192,8 @@ def test_sql_and_code_probes_find_the_same_positions(project: Project, tmp_path:
         probe("named_otherwise", kind="code", text=code.replace('"weather_calls"', '"rain_calls"')),
     ]
     for state in probes:
-        calls.hand_off(f"probes/{state.name}.{'sql' if state.kind == 'sql' else 'py'}", state.text)
-    hits, failed = run_probes(project, calls.workspace, probes, set(keys))
+        write_file(workspace, f"probes/{state.name}.{'sql' if state.kind == 'sql' else 'py'}", state.text)
+    hits, failed = run_probes(project, workspace, probes, set(keys))
     assert sorted(failed) == ["columns_wrong", "named_otherwise", "two_statements", "unknown_keys", "writes"]
     assert "returns the columns" in failed["columns_wrong"] and "one SELECT" in failed["two_statements"]
     assert "one SELECT" in failed["writes"] and "toucan/none" in failed["unknown_keys"]
@@ -208,14 +206,14 @@ def test_sql_and_code_probes_find_the_same_positions(project: Project, tmp_path:
 
 
 def test_draws_read_every_probe_and_explore_what_no_probe_hits(project: Project, tmp_path: Path) -> None:
-    calls = workspace_calls(project, tmp_path / "ws")
+    workspace = tmp_path / "ws"
     keys, matrix = frame_of(project)
-    prepare(calls, load_hunt(project, "misuse"), keys)
+    assert sorted(prepared(project, workspace)) == keys
     toucan = [key for key in keys if key.startswith("toucan/")]
-    calls.hand_off("probes/weather.sql", WEATHER_SQL)
-    calls.hand_off("probes/toucan_last.sql", TOUCAN_LAST_SQL)
+    write_file(workspace, "probes/weather.sql", WEATHER_SQL)
+    write_file(workspace, "probes/toucan_last.sql", TOUCAN_LAST_SQL)
     probes = [probe("weather"), probe("toucan_last", text=TOUCAN_LAST_SQL)]
-    hits, failed = run_probes(project, calls.workspace, probes, set(keys))
+    hits, failed = run_probes(project, workspace, probes, set(keys))
     assert not failed
     weather = sorted({key for key, _ in weather_positions()})
     state = HuntState(probes=probes, hits={"weather": weather, "toucan_last": toucan},
@@ -443,3 +441,114 @@ def test_hunt_replays_a_real_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     (run / "report.json").unlink()
     (run / "state" / "3.json").unlink()
     assert hunt(Project.load(project.root), "misuse", runner=NoCalls()) == report
+
+
+def recorded_answers(project: Project) -> tuple[dict[int, dict[str, Any]], dict[tuple[int, tuple[str, ...]], Any]]:
+    """What the replayed run's calls returned: the proposal of every round, and the verdicts of every group of cases,
+    by round and case files; with the request of every proposal under the key `request`."""
+    box = mailbox(project)
+    declared = registry(project).functions
+    proposals: dict[int, dict[str, Any]] = {}
+    verdicts: dict[tuple[int, tuple[str, ...]], Any] = {}
+    for path in (project.mailbox_dir / "requests").glob("*.json"):
+        call = Call.model_validate_json(path.read_bytes())
+        result = box.returned(call.id, declared[call.function].returns)
+        assert result is not None
+        value = result.unwrap().model_dump(mode="json")
+        if call.function == "hunt-propose-misuse":
+            proposals[call.request["round"]] = {"value": value, "request": call.request}
+        else:
+            verdicts[(call.request["round"], tuple(case["file"] for case in call.request["cases"]))] = value
+    return proposals, verdicts
+
+
+def test_an_agent_session_hunts_as_the_aifn_functions_do(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    replayed = real_run_project(tmp_path / "replayed")
+    monkeypatch.chdir(replayed.root)
+    report = hunt(replayed, "misuse", runner=HuntReplay(tmp_path / "replay"))
+    proposals, verdicts = recorded_answers(replayed)
+
+    # The same answers, handed in by an agent session step by step, give the same run.
+    session = real_run_project(tmp_path / "session")
+    monkeypatch.chdir(session.root)
+    capsys.readouterr()
+    assert main(["hunt", "start", "misuse"]) == 0
+    current = json.loads(capsys.readouterr().out)
+    workspace = Path(current["workspace"])
+    phases = []
+    while current["phase"] != "finished":
+        phases.append(current["phase"])
+        if current["phase"] == "propose":
+            recorded = proposals[current["round"]]
+            asked = json.loads((workspace / f"rounds/{current['round']}/input.json").read_text(encoding="utf-8"))
+            assert ProposeRequest.model_validate(asked) == ProposeRequest.model_validate(recorded["request"])
+            assert "proposal.schema.json" in (workspace / current["proposal"]["instruction"]).read_text("utf-8")
+            (workspace / current["proposal"]["answer"]).write_text(json.dumps(recorded["value"]), encoding="utf-8")
+            current = submit_proposal(session, "misuse")
+        elif current["phase"] == "verdicts":
+            for batch in current["batches"]:
+                cases = json.loads((workspace / batch["request"]).read_text(encoding="utf-8"))["cases"]
+                answer = verdicts[(current["round"], tuple(case["file"] for case in cases))]
+                (workspace / batch["answer"]).parent.mkdir(parents=True, exist_ok=True)
+                (workspace / batch["answer"]).write_text(json.dumps(answer), encoding="utf-8")
+            current = submit_verdicts(session, "misuse")
+        else:
+            assert current["phase"] == "close"
+            current = close_hunt(session, "misuse")
+    assert phases == ["propose", "verdicts", "propose", "verdicts", "propose", "verdicts", "close"]
+    assert current["report"] == report
+    for name in ("1.json", "2.json", "3.json"):
+        assert (session.hunting_dir / "misuse/1/state" / name).read_text(encoding="utf-8") == \
+            (replayed.hunting_dir / "misuse/1/state" / name).read_text(encoding="utf-8")
+    for path in (replayed.hunts_dir / "misuse").iterdir():
+        assert (session.hunts_dir / "misuse" / path.name).read_bytes() == path.read_bytes()
+    findings = [pq.read_table(project.tables_dir / f"{FINDINGS_TABLE}.parquet") for project in (replayed, session)]
+    assert findings[0].equals(findings[1])
+    assert main(["hunt", "status", "misuse"]) == 0
+    assert json.loads(capsys.readouterr().out)["phase"] == "finished"
+
+
+def test_an_agent_session_hands_in_only_what_fits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    replayed = real_run_project(tmp_path / "replayed")
+    monkeypatch.chdir(replayed.root)
+    hunt(replayed, "misuse", runner=HuntReplay(tmp_path / "replay"))
+    proposals, _ = recorded_answers(replayed)
+    session = real_run_project(tmp_path / "session")
+    monkeypatch.chdir(session.root)
+    with pytest.raises(ConfigError, match="no run in progress"):
+        submit_proposal(session, "misuse")
+    current = start_hunt(session, "misuse")
+    workspace = Path(current["workspace"])
+    with pytest.raises(ConfigError, match="goes on until"):
+        close_hunt(session, "misuse")
+    with pytest.raises(ConfigError, match="proposal.json does not exist"):
+        submit_proposal(session, "misuse")
+    proposal = proposals[1]["value"]
+    answer = workspace / current["proposal"]["answer"]
+    answer.write_text(json.dumps({**proposal, "probes": [{**proposal["probes"][0], "facet": "unknown"}]}),
+                      encoding="utf-8")
+    with pytest.raises(ConfigError, match="(?s)does not fit its schema.*facets that `facets` lacks"):
+        submit_proposal(session, "misuse")
+    answer.write_text(json.dumps(proposal), encoding="utf-8")
+    current = submit_proposal(session, "misuse")
+    assert current["phase"] == "verdicts" and [batch["answered"] for batch in current["batches"]] == [False, False]
+    with pytest.raises(ConfigError, match="waits for its verdicts"):
+        submit_proposal(session, "misuse")
+    with pytest.raises(ConfigError, match="waits for the verdicts of an agent session"):
+        hunt(session, "misuse", runner=NoCalls())
+    with pytest.raises(ConfigError, match="are not written yet"):
+        submit_verdicts(session, "misuse")
+    first, second = current["batches"]
+    files = [case["file"] for case in json.loads((workspace / first["request"]).read_text("utf-8"))["cases"]]
+    named = [{"file": file, "found": True, "facet": "made_up", "steps": [3], "why": "w"} for file in files]
+    for batch in (first, second):
+        (workspace / batch["answer"]).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / batch["answer"]).write_text(json.dumps({"verdicts": named}), encoding="utf-8")
+    with pytest.raises(ConfigError, match="names facets facets.json lacks: \\['made_up'\\]"):
+        submit_verdicts(session, "misuse")
+    (workspace / first["answer"]).write_text(json.dumps({"verdicts": named[:1]}), encoding="utf-8")
+    with pytest.raises(ConfigError, match="gives one per case"):
+        submit_verdicts(session, "misuse")
+    assert status(session, "misuse")["phase"] == "verdicts"

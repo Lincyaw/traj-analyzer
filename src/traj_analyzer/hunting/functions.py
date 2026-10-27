@@ -181,13 +181,15 @@ def hunt_functions(project: Project, hunt: str, spec: HuntSpec) -> dict[str, AiF
     }
 
 
-_WORKSPACE = f"""\
+def _workspace(request: str) -> str:
+    """The workspace as an agent proposing probes finds it; `request` is the file holding its request."""
+    return f"""\
 ## The workspace
 
 The working directory is the workspace of one hunt: a search for the trajectories a person asks for.
 Rounds follow one another in it; in each, an agent proposes probes, the probes run over every trajectory, a
 sample of the trajectories is read, and the verdicts go into the ledger.
-`input.json` names the files you build on in `files`; read `README.md` first, it describes every file and table.
+`{request}` names the files you build on in `files`; read `README.md` first, it describes every file and table.
 
 - `{NEED}`: what the person is looking for.
 - `trajectories/<dataset>/<id>.md`: every trajectory of the hunt. A file opens with a description of the dataset,
@@ -213,11 +215,11 @@ Write only below `notes/` and `operators/`.
 """
 
 
-def propose_instruction(spec: HuntSpec, round_: int) -> str:
+def propose_instruction(spec: HuntSpec, round_: int, request: str = "input.json") -> str:
     return f"""\
 # Propose probes that find what a person asks for
 
-{_WORKSPACE}
+{_workspace(request)}
 ## Your task
 
 This is round {round_}. Return `facets`, the kinds of behaviour the need covers, and `probes`, the mechanical
@@ -280,10 +282,12 @@ read with what each showed, and why each probe has its form.
 """
 
 
-VERIFY_INSTRUCTION = f"""\
+def verify_instruction(request: str) -> str:
+    """What an agent reading cases is told; `request` is the file holding the cases."""
+    return f"""\
 # Read trajectories for what a person asks for
 
-`input.json` holds `cases`: trajectory files of the working directory, `rounds/<round>/cases/<dataset>/<id>.md`,
+`{request}` holds `cases`: trajectory files of the working directory, `rounds/<round>/cases/<dataset>/<id>.md`,
 each whole and uncut. For some of them `hits` gives the positions where a probe, a mechanical search, found
 something; the others are trajectories no probe hits.
 `{NEED}` says what the person looks for, and `{FACETS}` the kinds of it known so far, each with what does not count.
@@ -308,4 +312,18 @@ Decide for every case whether the trajectory shows what `{NEED}` describes, and 
   found, say why the hits are not what the need describes; the next round reads this to tighten the probe.
 
 Judge every case on its own.
+"""
+
+
+VERIFY_INSTRUCTION = verify_instruction("input.json")
+
+
+def answer_section(answer: str, schema: str) -> str:
+    """How an agent session hands in its result, where an aifn function returns it through its harness: as one
+    JSON file the hunt's commands check against the JSON Schema of the result."""
+    return f"""
+## Your answer
+
+Write your result to `{answer}` as one JSON object that the JSON Schema `{schema}` describes, and nothing else.
+The file is checked against the schema when it is handed in; a file that does not fit is sent back with the errors.
 """

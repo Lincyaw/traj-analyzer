@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
+from pydantic import BaseModel, ConfigDict
 from sklearn.cluster import KMeans
 
 from traj_analyzer.hunting.functions import Hit
@@ -13,8 +12,11 @@ from traj_analyzer.sampling import diverse
 from traj_analyzer.vectorize import Matrix
 
 
-@dataclass(frozen=True)
-class Draw:
+class Draw(BaseModel):
+    """One trajectory a round reads: why it was drawn, and where the active probes hit it."""
+
+    model_config = ConfigDict(frozen=True)
+
     key: str
     source: Source
     hits: list[Hit]

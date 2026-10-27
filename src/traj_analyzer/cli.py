@@ -18,6 +18,7 @@ from traj_analyzer.evaluation import evaluate, load_evaluation, reference_keys
 from traj_analyzer.extract import coverage, extract
 from traj_analyzer.files import parse_yaml
 from traj_analyzer.hunting import hunt
+from traj_analyzer.hunting.steps import close_hunt, start_hunt, status, submit_proposal, submit_verdicts
 from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.labels import labels_report
 from traj_analyzer.layers import describe_tables, discover_layers, enabled_layers
@@ -41,9 +42,12 @@ app = typer.Typer(help=DESCRIPTION, no_args_is_help=True, add_completion=False, 
 adapters_app = typer.Typer(help="Data sources.", no_args_is_help=True)
 operators_app = typer.Typer(help="Browse, enable and disable operators.", no_args_is_help=True)
 layers_app = typer.Typer(help="Parsing layers and the tables they write.", no_args_is_help=True)
+hunt_app = typer.Typer(help="Hunts: searches for every trajectory that shows what hunts/<name>.yaml asks for, run "
+                            "whole with aifn or step by step by an agent session.", no_args_is_help=True)
 app.add_typer(adapters_app, name="adapters")
 app.add_typer(operators_app, name="operators")
 app.add_typer(layers_app, name="layers")
+app.add_typer(hunt_app, name="hunt")
 
 Datasets = Annotated[list[str] | None, typer.Option("--dataset", help="Restrict to this dataset; repeatable.")]
 
@@ -342,16 +346,49 @@ def cmd_mine(rounds: Annotated[int, typer.Option(min=1, help="At most this many 
     _emit({"rounds": [report.model_dump(mode="json") for report in reports]})
 
 
-@app.command("hunt")
-def cmd_hunt(
-    name: Annotated[str, typer.Argument(help="A hunt of the project, hunts/<name>.yaml.")],
+HuntName = Annotated[str, typer.Argument(help="A hunt of the project, hunts/<name>.yaml.")]
+
+
+@hunt_app.command("run")
+def cmd_hunt_run(
+    name: HuntName,
     max_rounds: Annotated[int | None, typer.Option(min=1, help="At most this many rounds; default from the "
                                                                "hunt.")] = None,
     workers: Workers = None,
 ) -> None:
-    """Search the trajectories for what a hunt asks for: propose probes, read what they hit and a sample of what they
-    miss, and refine them until rounds in a row find nothing new."""
+    """Run the whole search with the aifn functions of the hunt: propose probes, read what they hit and a sample of
+    what they miss, and refine them until rounds in a row find nothing new."""
     _emit(hunt(Project.find(), name, max_rounds=max_rounds, workers=workers))
+
+
+@hunt_app.command("start")
+def cmd_hunt_start(name: HuntName) -> None:
+    """Start a run for an agent session, or continue the one in progress, and write what its next step reads."""
+    _emit(start_hunt(Project.find(), name))
+
+
+@hunt_app.command("status")
+def cmd_hunt_status(name: HuntName) -> None:
+    """Where the run stands, the files the next step reads and writes, and the command that takes it."""
+    _emit(status(Project.find(), name))
+
+
+@hunt_app.command("propose")
+def cmd_hunt_propose(name: HuntName) -> None:
+    """Take the proposal an agent session wrote, run its probes, and write the cases the round reads."""
+    _emit(submit_proposal(Project.find(), name))
+
+
+@hunt_app.command("verdicts")
+def cmd_hunt_verdicts(name: HuntName) -> None:
+    """Take the verdicts the readers wrote and record the round; after the closing check, write the report."""
+    _emit(submit_verdicts(Project.find(), name))
+
+
+@hunt_app.command("close")
+def cmd_hunt_close(name: HuntName) -> None:
+    """Close a run whose search has ended: write the cases of the closing check, or finish the run."""
+    _emit(close_hunt(Project.find(), name))
 
 
 @app.command("try")

@@ -20,7 +20,7 @@ dependencies = [
     "scikit-learn>=1.9.1",
     "scipy>=1.18.1",
     "shasta",
-    "sqlglot>=30.19",
+    "sqlglot>=30.19,<30.22",
     "typer>=0.27.2",
     "uvicorn>=0.54.0",
 ]
@@ -33,8 +33,8 @@ requires = ["uv_build>=0.12.12,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-aifn = { git = "https://github.com/Lincyaw/aifn" }
-shasta = { git = "https://github.com/binpash/shasta" }
+aifn = { git = "https://github.com/Lincyaw/aifn", rev = "7938dd2f4437fa7605f583610a301f3c2427831b" }
+shasta = { git = "https://github.com/binpash/shasta", rev = "3ec173d6dc96e9007f5b582634f9315eafcac867" }
 
 [tool.uv.extra-build-dependencies]
 shasta = ["setuptools"]

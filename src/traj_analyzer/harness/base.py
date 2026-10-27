@@ -55,6 +55,9 @@ class Harness:
     group 2; the files of an edit tool that takes a patch come from it."""
     exit_code: re.Pattern[str] | None = None
     """Matches the exit code a shell result reports, with the number as group 1."""
+    closing_exit_code: re.Pattern[str] | None = None
+    """Matches the exit code a shell result reports at its end, with the number as group 1; it is searched in the
+    closing characters of the result, as `exit_code` is in the opening."""
     rejected: tuple[str, ...] = ()
     """Marks in the opening of a result that says the user or a policy refused the call."""
     interrupted: tuple[str, ...] = ()
