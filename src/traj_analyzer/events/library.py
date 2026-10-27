@@ -114,8 +114,8 @@ RULES = [
     ),
     Rule(
         name="failure_run", edge="tool", severity="medium",
-        description=f"{FAILURE_RUN} consecutive tool calls fail with no success and no message from the user in "
-                    "between. Recovered when a later call ends ok.",
+        description=f"{FAILURE_RUN} consecutive tool calls fail with no successful call in between. Recovered when "
+                    "a later call ends ok.",
         precondition=_failure_runs, expectation=_never, recovery=_any_ok_later,
         note=lambda c, p: f"{FAILURE_RUN} failed calls in a row, the last: "
                           f"{c.actions[p]['text'] or c.actions[p]['tool']}",

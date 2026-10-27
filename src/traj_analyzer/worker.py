@@ -9,6 +9,7 @@ from aifn import Call, Mailbox, Registry, Worker
 from aifn.engines import DeepSeekEngine
 
 from traj_analyzer.extract import FUNCTIONS_VARIABLE
+from traj_analyzer.hunting.functions import functions as hunting_functions
 from traj_analyzer.mining import functions as mining_functions
 from traj_analyzer.operators.catalog import runtime_groups
 from traj_analyzer.project import ConfigError, Project
@@ -32,8 +33,9 @@ class WorkerMailbox(Mailbox):
 
 
 def registry(project: Project) -> Registry:
-    """Every aifn function a worker of this project may be asked to run: feature extraction and mining."""
+    """Every aifn function a worker of this project may be asked to run: feature extraction, mining and hunts."""
     functions = dict(mining_functions.functions(project))
+    functions.update(hunting_functions(project))
     for group in runtime_groups(project):
         if group.is_code:
             continue

@@ -292,3 +292,13 @@ class Project:
     def trial_path(self) -> Path:
         """Definitions of the judged candidates under trial, in the parameters of the `llm.features` operator."""
         return self.mining_dir / "trial.json"
+
+    @property
+    def hunts_dir(self) -> Path:
+        """The hunts of the project, `<name>.yaml` each, and the probes every finished hunt kept, in `<name>/`."""
+        return self.root / "hunts"
+
+    @property
+    def hunting_dir(self) -> Path:
+        """The runs of the hunts: their workspaces, their state after every round and their reports."""
+        return self.data_dir / "hunts"

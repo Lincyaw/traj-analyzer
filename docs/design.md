@@ -21,18 +21,20 @@ flowchart LR
     unified -->|layers: sql, shell, actions, project| tables[(Tables: steps, actions, relations, queries)]
     tables -->|code operators| features[(features, evidence, events)]
     unified -->|judgment operators| features
-    features -->|traj anomalies| anomalies[(shifts, lifts, anomalies)]
+    features -->|traj anomalies| anomalies[(shifts, lifts, oversight, anomalies)]
     features --> view[traj view: panels, tables, trajectories]
     anomalies --> view
     tables -->|traj mine| mined[operators/mined, traj.yaml]
     mined --> features
+    tables -->|traj hunt| hunted[(hunt_findings, hunts/name)]
+    hunted --> view
 ```
 
 The work splits into two layers:
 
 | Layer | Responsibility | Form |
 |---|---|---|
-| `traj` CLI | ingest, render, chunk, run the parsing layers, manage operators, schedule extraction, store, vectorize, detect anomalies, sample, mine | Python package with deterministic steps, a typer application |
+| `traj` CLI | ingest, render, chunk, run the parsing layers, manage operators, schedule extraction, store, vectorize, detect anomalies, sample, mine, hunt | Python package with deterministic steps, a typer application |
 | Shared agent skills | write operators, read samples, write reports, feed findings back into operators and config | `.claude/skills/` holds the content, `.agents/skills/` links to it for Codex; both are installed by `traj init` |
 
 Three kinds of computation differ in cost, and the configuration keeps each where it belongs:
@@ -41,7 +43,7 @@ Three kinds of computation differ in cost, and the configuration keeps each wher
 |---|---|---|
 | code | an operator that reads the trajectory and its tables | every trajectory, on every `traj extract` |
 | judgment | one model call with a structured answer, no tools, over a trajectory, every turn of it, or one window | every trajectory, or a sample per batch, or the trajectories inside a scope |
-| function | a multi-step aifn agent with a workspace and a shell | once per scenario in `traj mine`, and a few calls per candidate for the tail check |
+| function | a multi-step aifn agent with a workspace and a shell | once per scenario in `traj mine`, and a few calls per candidate for the tail check; one proposal and the reading calls of every round of `traj hunt` |
 
 The skills are written once, in `.claude/skills/` of the tool repository.
 The project template `src/traj_analyzer/templates/project/claude/skills/` holds a symbolic link to each skill file, so the package ships their content, and a new skill file needs a link there as well.
@@ -67,18 +69,21 @@ An analysis project is a git repository created by `traj init <dir>`:
 | `adapters/*.py` | project adapters, one per file | yes |
 | `reports/*.md` | reports written by Codex or Claude Code | yes |
 | `reviews/verdicts.jsonl` | what people found on the trajectories a feature pointed to, written by `traj review` (section 16) | yes |
+| `hunts/<name>.yaml` | what a hunt looks for and how much it reads (section 18) | yes |
+| `hunts/<name>/` | the facets and probes the last run of the hunt kept, which the next run starts from | yes |
 | `.claude/skills/` | shared skill content copied from the tool repository | yes |
 | `.agents/skills/<name>` | relative directory links to the shared skills for Codex | yes |
 | `.traj/datasets/<dataset>/` | `<id>.json`, `<id>.md`, `index.jsonl` | no |
 | `.traj/instructions/` | instruction files generated for call groups | no |
 | `.traj/mailbox/` | aifn tasks and conclusions, which also serve as the cache | no |
 | `.traj/features/<group>.parquet` | feature table | no |
-| `.traj/tables/<name>.parquet` | the tables of section 14: steps, trajectories, the layer tables, evidence, events, judgments, shifts, lifts, anomalies | no |
+| `.traj/tables/<name>.parquet` | the tables of section 14: steps, trajectories, the layer tables, evidence, events, judgments, shifts, lifts, oversight, anomalies, and `hunt_findings` of section 18 | no |
 | `.traj/windows/<group>/<dataset>/<id>.<k>.md` | the rendered windows of a call group over windows | no |
 | `.traj/samples/<sampler>/<run>/selection.json` | sampling results | no |
 | `.traj/evaluation/` | second measurements per group and `features.json`, the result of `traj evaluate` | no |
 | `.traj/mining/<round>/` | the workspace, trial values and `report.json` of one mining round | no |
 | `.traj/mining/scenario.md` | what the trajectories are, as the last finished mining round described it | no |
+| `.traj/hunts/<name>/<run>/` | the workspace, the state after every round, the clusters and `report.json` of one run of a hunt | no |
 
 `traj mine` writes the code operators it accepts to `operators/mined/<name>.py` and the judgment features it accepts to `traj.yaml`, so they are in git like every other operator.
 
@@ -101,6 +106,7 @@ Everything under `.traj/` can be regenerated from those files and the raw data.
 | | `name` | tool name for `tool_call` and `tool_result`, or the name of a `notice`: `interruption` when the user interrupted the assistant, `injected` when the harness or the dataset inserted the text |
 | | `is_error` | whether a `tool_result` is an error |
 | | `timestamp` | time stamp |
+| | `arguments` | the JSON text of the arguments of a `tool_call`, set by an adapter that parses the call; empty when `content` holds the arguments as written |
 
 A trajectory is identified globally by `<dataset>/<id>`, called its key.
 A `notice` is text the harness wrote under the user's role; it is no message the user typed, so it opens no turn, and it is rendered as `### #<n> user · notice · <name>`.
@@ -147,6 +153,7 @@ An Anthropic `tool_result` block becomes a step with role `tool`, even inside a 
 By default `system` and `developer` map to system, `user` and `human` to user, `assistant` and `gpt` to assistant, and `tool` and `function` to a tool `tool_result`.
 An unmapped role stops ingestion with an error.
 `tool_call_format` says how the content of a message of kind `tool_call` encodes the tool name: `text`, `json` or `python_literal`.
+With `json` and `python_literal`, the step keeps the call text as its content and holds the call's arguments in `arguments`.
 A record whose message list is null or empty stops ingestion with an error, unless `skip_empty` is true.
 
 A corrupt input file stops ingestion with an error that names the file and line.
@@ -263,7 +270,7 @@ The built-in library:
 | `stats.tool_paths` | code | `tool_paths`: one path per tool call, the tool name and then its outcome | paths |
 | `stats.actions` | code | reads the `actions` and `relations` tables: `action_paths` with the levels act, program, effect and outcome; `action_moves` with the levels after, act and program; and factors of how the agent edits, verifies, retries, undoes and takes side effects, such as `edit_seen_share`, `edit_verified_share`, `verified_at_end`, `retry_share`, `recovery_share`, `side_effects`, `forced_actions` and `undo_actions`, the counts with the calls they count as evidence | paths, scalar, boolean |
 | `stats.dialogue` | code | `interjections`, messages the user typed while the assistant was calling tools; `repeated_prompts`; `short_prompt_share`; `prompt_chars_median` | scalar |
-| `events.generic` | code | reads the `actions` and `relations` tables: the event rules of section 15 that hold in every scenario, `result_unanswered`, `blind_retry`, `side_effect_unasked` and `failure_run` | event |
+| `events.generic` | code | reads the `actions`, `relations` and `turns` tables: the event rules of section 15 that hold in every scenario, `result_unanswered`, `blind_retry`, `side_effect_unasked`, `failure_run`, `interrupted_at_plan` and `interrupted_without_output` | event |
 | `meta.fields` | code | chosen metadata fields, set by the `fields` parameter | per parameter |
 | `signals.user_reaction` | judgment over turns | `reaction` per message the user typed: failure_report, rejection, repeat, correction, clarify, continue, new_task or other, decided in that order, with correction, rejection, failure_report and repeat as events on the owner edge; aggregated into `pushback_share`, `pushbacks`, `failure_reports`, `repeats` and `ended_with` | category; scalar, scalar, scalar, scalar, category |
 | `signals.end_state` | judgment | `end_state`: done, partial, abandoned or unclear; `agent_claims_done` | category, boolean |
@@ -571,12 +578,13 @@ The `traj-report` skill guides Codex or Claude Code through these steps:
 | `traj extract [--group g] [--dataset d] [--key k] [--limit n] [--workers n] [--dry-run]` | check the configuration and samplers, run the layers, extract features, write the tables, and report coverage per group |
 | `traj table [--dataset d] [--column c...]` | print the wide table as CSV |
 | `traj query <sql> [--limit n]` | run one DuckDB query over the tables of `.traj/tables/`, named as `'steps.parquet'`, and print the rows as CSV |
-| `traj anomalies` | compare every batch with the baseline inside every stratum, measure the consequence lift of every event rule, score every trajectory, and write `shifts`, `lifts` and `anomalies` (section 16) |
+| `traj anomalies` | compare every batch with the baseline inside every stratum, measure the consequence lift of every event rule, score every trajectory, and write `shifts`, `lifts`, `oversight` and `anomalies` (section 16) |
 | `traj view [--host 127.0.0.1] [--port 8000]` | serve configurable feature analysis, a searchable feature table, and every table of the project |
 | `traj sample [--sampler default] [--budget n]` | sample |
 | `traj tree <feature> [--dataset d] [--support s] [--by c] [--within c] [--top n]` | show a paths feature as a tree: the size of every level, where events are cut, and the most used nodes |
 | `traj evaluate [--workers n]` | measure noise, variation and dependence of every enabled feature, assign roles, report drift of the trajectories outside the reference set, and with labels declared, check the signals and the anomalies against them (section 17) |
 | `traj mine [--rounds n] [--workers n]` | describe the scenario, propose and test hypotheses about measures and expectations, check the resulting features, check their tails, and write the accepted ones to `operators/mined/` and `traj.yaml` |
+| `traj hunt <name> [--max-rounds n] [--workers n]` | search the trajectories for what `hunts/<name>.yaml` asks for: propose probes, read what they hit and a sample of what they miss, and refine them until `patience` rounds in a row find nothing new; write the findings and keep the probes (section 18) |
 | `traj try <file> [--key k]...` | compute a code operator file on the reference set and print how its values spread, the objection of the checks, and the value and evidence steps for every `--key`; changes nothing |
 | `traj review <key> --feature <name> [--step n] --worth\|--no-worth [--note text]` | record what a person found on a trajectory a feature pointed to, in `reviews/verdicts.jsonl`, and print the feature's human precision so far (section 16) |
 
@@ -711,7 +719,7 @@ When monitored trajectories exist, it also holds per feature the Jensen-Shannon 
 | `ε > evaluation.noise_max` | revise once; remove when the revised feature is still above the limit |
 | a set or category feature without `labels` has more than `evaluation.label_limit` distinct labels in R | revise into a closed set of `labels`; the feature stays as it is when the revision is not accepted |
 | a candidate does not reproduce the value of one of its examples | a judgment candidate is revised once and rejected when the revised candidate still does not; a code candidate is rejected |
-| a candidate has one distinct value over the trajectories it was extracted from | reject: a definition never seen to take a second value cannot be told from one that always returns the same value |
+| a candidate has one distinct value over the trajectories it is measured on | reject: a definition never seen to take a second value cannot be told from one that always returns the same value |
 | fewer than `mining.varying_min` of those trajectories differ from the candidate's most common value | reject: the candidate tells almost no trajectories apart |
 | at least `mining.context_share_max` of the trajectories that differ from the most common value share one value of a category context feature, and fewer than half of the trajectories have that value | reject: the candidate describes one project, model or other group, and says nothing elsewhere |
 | a candidate has no value that both models measured | reject |
@@ -719,7 +727,12 @@ When monitored trajectories exist, it also holds per feature the Jensen-Shannon 
 | a candidate passes the rows above | add, with the role of section 10.3, and with `tail_precision`, `lift` and `alert` from the tail check of section 10.5 |
 | the mined judgment features number more than `mining.capacity` | remove those with the highest `ε` first, then by name |
 
-A code candidate is extracted from R, and a judgment candidate from the evaluation set.
+A code candidate is measured on R.
+A judgment candidate is measured on a sample of its scope, which is the reference trajectories that meet its `scope`, or R when it has none.
+The sample holds at most `mining.trial_size` trajectories: first the trajectories of the evaluation set in the scope, in key order, then a random draw, seeded with `evaluation.seed` and the round number, from the rest of the scope without the candidate's examples.
+The engine model extracts the sample and the examples, and `evaluation.model` extracts the sample.
+Noise and spread are computed on the sample alone, since the examples were chosen for their values.
+A judgment candidate whose scope cannot be evaluated, or holds fewer than 4 reference trajectories, is rejected.
 Noise is the only reason to remove an enabled feature for its quality: a feature without variation is an invariant, and a feature that another determines is a recorded relation.
 A candidate is held to more, because adding a feature costs an extraction of every trajectory.
 `traj evaluate` reports decisions and changes nothing.
@@ -751,7 +764,7 @@ A step without a conclusion runs again from the files the driver wrote: its note
 | 5. `mine-explore` | tests every hypothesis: chooses trajectories of different batches and strata with and without the behaviour, queries the tables across all trajectories, looks at what follows the behaviour, and returns a finding per hypothesis as supported, revised or abandoned, with examples, its spread and its consequence | a hypothesis would become a feature without having met the data |
 | 6. `mine-define` | writes each supported or revised finding as a feature definition with examples, at most `mining.candidates`: a measure as a scalar, boolean, category or set feature, an expectation as an event feature; for a question the tables answer it writes the code operator with its evidence or its rule, tries it with `traj try` and returns the file | no definitions to check, and questions that the tables answer would cost one model call per trajectory |
 | 7. `mine-review` | judges every candidate as the owner of the feature set against the data: evidence, the positions a rule reports, scope, origin, redundancy, the literalness of the question, and whether anything follows the behaviour; a panel that would show change meaning nothing is rejected | definitions would be checked for their numbers alone |
-| 8. trial extraction | judgment candidates form the group `mined-trial`, defined by `.traj/mining/trial.json` while the extraction runs; it is extracted on the evaluation set and the example trajectories with the engine model and on the evaluation set with `evaluation.model`; code candidates are computed on R and their example trajectories, with the steps their values rest on | the quantities cannot be computed |
+| 8. trial extraction | judgment candidates form the group `mined-trial`, defined by `.traj/mining/trial.json` while the extraction runs; it is extracted on the samples of section 10.4 and the example trajectories with the engine model and on the samples with `evaluation.model`; code candidates are computed on R and their example trajectories, with the steps their values rest on | the quantities cannot be computed |
 | 9. decide | section 10.4 | no ground for adding or removing |
 | 10. `mine-revise` | one call per feature to revise: reads the disagreeing trajectories and returns a rewritten definition, several simpler definitions, a closed label set, or a drop with its reason; the result goes through steps 8 and 9 once | a noisy candidate could only be dropped, and the next round would propose it again |
 | 11. `mine-tail-check` | one call per accepted feature: reads `alerts.tail_size` trajectories of its tail, the highest values, the true ones, the rarest labels, the largest sets or the most unrecovered events, at the steps the values rest on, and says of each whether a person responsible for the agent should look at it and on which edge it went wrong; the share worth a look is the feature's `tail_precision`, an event feature also gets its consequence lift (section 16), and a feature with both above `alerts.min_tail_precision` and `alerts.min_lift` is marked `alert` | every feature would be a panel and none an alert, or every tail would be an alert |
@@ -792,7 +805,8 @@ A file another function wrote tells where to look and does not replace looking: 
 `mine-explore` reads those trajectories first and then goes beyond them, and `mine-define` reads the examples of a finding and further trajectories before it writes the definition.
 
 `features.csv`, `features.md` and `tables/trajectories.parquet` leave out the context features and metadata keys of `render.hide_metadata`, and the trajectory files hide those keys, so an evaluation result kept from the judgment operators stays unseen in mining as well.
-Candidates are judged on trajectories the functions could not read: an example counts only when it names a file of `trajectories/`, and a candidate left without examples is rejected.
+The sample of a judgment candidate takes the trajectories of the evaluation set in its scope first, since no function could read them, and leaves out the candidate's own examples (section 10.4).
+An example counts only when it names a file of `trajectories/`, and a candidate left without examples is rejected.
 
 The five functions of the sequence have write access to the workspace and a shell, and they run one at a time, since calls that write to one directory at the same moment read each other's half-written files.
 A function hands its result to the next through the driver: the driver writes what the function submitted, which aifn has checked against the output model, to the function's file.
@@ -867,6 +881,7 @@ Both changes are edits of `traj.yaml` and are committed like any other configura
 | `mining.starting` | 12 | trajectories listed in `start.txt` |
 | `mining.hypotheses` | 12 | most hypotheses a round tests |
 | `mining.candidates` | 15 | most candidates a round carries into the checks |
+| `mining.trial_size` | 30 | most trajectories of its scope a judgment candidate is measured on, by both models |
 | `mining.varying_min` | 0.02 | least share of trajectories that differ from a candidate's most common value |
 | `mining.context_share_max` | 0.9 | share of a candidate's varying trajectories in one context value from which the candidate counts as confined to it |
 | `mining.batch_explained_min` | 0.02 | with batches declared, least share of a candidate's variance the batches explain inside the strata |
@@ -887,7 +902,7 @@ Both changes are edits of `traj.yaml` and are committed like any other configura
 - Problems already present in R count as normal behaviour.
 - The three quantities show that a feature is reliable and what part it plays; how much it matters to an analysis is expressed downstream, in a sampler's feature weights.
 - A code operator written by `mine-define` runs in the project's environment without isolation.
-- The spread check of a judgment candidate rests on the evaluation set, so a behaviour rarer than a few in `evaluation.size` trajectories is rejected or passes by chance.
+- The spread check of a judgment candidate rests on a sample of at most `mining.trial_size` trajectories of its scope, so a behaviour rarer than a few in that many trajectories is rejected or passes by chance.
 - The tail check reads `alerts.tail_size` trajectories, so a tail precision is a coarse estimate, and a feature whose tail the checking model misjudges raises alerts or stays a panel wrongly.
 - The functions are told to read only `trajectories/`, and nothing but the links in that directory keeps them from the other trajectories of the project.
 
@@ -941,6 +956,8 @@ It keeps state across calls that a rejected text corrupts, and on some texts it 
 `traj_analyzer.actions` turns the tool calls of a trajectory into actions: what the agent did, to what, with what effect, and how it ended.
 It is the layer above the shell component, and like it, it knows no trajectory and no feature type: it takes `Call` records, the tool name, the arguments text, the result text and the number of messages the user had typed, and the caller pairs calls with results.
 It knows no harness either: the names of the tools, the keys of their arguments and the openings of the results come from the `Harness` profile of section 13.1 that every call of the component takes.
+A call's arguments are the `arguments` of its `tool_call` step when the adapter set them, and the step's content otherwise.
+Arguments text that starts with `{` and is not valid JSON stops extraction with an error.
 
 | Module | Provides |
 |---|---|
@@ -991,7 +1008,7 @@ The layers run in an order where every layer comes after the layers writing the 
 | `evidence` | code and judgment features | step a feature value rests on | `feature`, `step`, `note` |
 | `events` | event features and event marks | event | `rule`, `step`, `end`, `edge`, `objects`, `recovered`, `recovered_at`, `note` |
 | `judgments` | judgment groups over turns or windows | judged unit | `group`, `unit`, `index`, `start`, `end`, `feature`, `value` as JSON text, `evidence` |
-| `shifts`, `lifts`, `anomalies` | `traj anomalies` | section 16 | section 16 |
+| `shifts`, `lifts`, `oversight`, `anomalies` | `traj anomalies` | section 16 | section 16 |
 
 Every table has the column `key`, `<dataset>/<id>`, and lives in `.traj/tables/<name>.parquet`.
 An extraction replaces the rows of the trajectories it covered and keeps the rows of the others; in `events`, `evidence` and `judgments` it replaces only the rows of the rules, features and groups it ran, since other runs write such rows too.
@@ -1098,6 +1115,125 @@ With `turn_correction`, it also checks the judged `reaction` of every labelled m
 This is the one place where the reaction judgment meets labels made by people, so it is where the context a call shows and the model that judges are chosen.
 These numbers check that the signals, the rules and the anomaly score are worth trusting on a dataset where the truth is known; a scenario in use has no labels, and its flow has no such step.
 
+## 18. Hunts
+
+A hunt looks for every trajectory that shows what a person asks for, such as an agent that makes a check pass without doing the task, or one that runs destructive commands nobody asked for.
+Features describe how batches differ, and the checks of mining keep a feature only when enough trajectories vary on it and no single project or model explains it, so a behaviour that a few trajectories show, or that one model shows, is rejected there.
+A hunt is judged by the trajectories it finds and by how many it may still miss.
+`traj hunt <name>` runs one, in the package `traj_analyzer/hunting/`.
+
+### 18.1 The hunt file
+
+`hunts/<name>.yaml` names a hunt; the name matches `[a-z][a-z0-9_-]{0,39}`.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `need` | required | what the trajectories worth finding show, in the words of the person who asks |
+| `datasets` | `all` | the datasets searched |
+| `patience` | 3 | rounds in a row without a new finding that end the search |
+| `max_rounds` | 12 | most rounds, which bounds the model calls |
+| `reads_per_round` | 60 | trajectories read per round |
+| `hit_share` | 0.6 | share of the reads of a round drawn from the hits of the probes |
+| `min_reads_per_probe` | 3 | reads every active probe with unread hits gets before the rest of the hit reads is shared out |
+| `cases_per_call` | 6 | trajectories one `hunt-verify` call reads |
+| `clusters` | 40 | clusters of the trajectories the coverage reads go through |
+| `probes_max` | 20 | most active probes |
+| `min_precision` | 0.5 | precision below which the ledger asks for a probe to be revised |
+| `final_reads` | 120 | reads of the closing check |
+| `seed` | 0 | seed of the draws and the clusters |
+| `model` | `mining.model`, then `engine.model` | model of the two functions of the hunt |
+
+Every hunt declares two aifn functions, `hunt-propose-<name>` and `hunt-verify-<name>`, and the workers of a project declare those of every hunt file.
+
+### 18.2 Facets and probes
+
+A facet is one way a trajectory can show the need, as something a reader can point to at a step, with what looks alike and does not count.
+A probe is a mechanical search that finds positions, a trajectory and a step, for one facet:
+
+| Kind | Form |
+|---|---|
+| `sql` | one DuckDB `SELECT` over the tables of the workspace, returning exactly the columns `key`, `step` and `note` |
+| `code` | an operator file with one output of type `event` named like the probe; every event is a position |
+
+A probe may match words and patterns in what a user, a model or a tool wrote, because every trajectory it hits is checked by reading.
+A probe whose query fails, returns other columns, more than one statement or a key of no trajectory of the hunt, or whose operator file fails or has another output, is `failed` for the round, with the error in the ledger.
+
+### 18.3 A round
+
+| Step | What it does |
+|---|---|
+| 1. propose | `hunt-propose` reads the need, the facets, the probes, the ledger, the findings and the verdicts of the round before, queries the tables and reads trajectories, and returns every facet and every probe of the next round, at most `probes_max`, with the reason for every probe it retires |
+| 2. apply | a probe returned with the text it had keeps its counts; a probe with a new text starts in this round; an active probe left out is retired; a facet with confirmed trajectories stays even when the proposal leaves it out |
+| 3. search | every active probe runs over every trajectory of the hunt; the positions go to `rounds/<round>/hits.parquet` |
+| 4. retire | an active probe with at least twice `min_reads_per_probe` hits read and none of them confirmed becomes `unproductive`; a proposal that returns it with the same text does not revive it |
+| 5. draw | section 18.4 |
+| 6. verify | `hunt-verify` reads the drawn trajectories, `cases_per_call` per call, the calls side by side, each whole and uncut, and gives every one a verdict: whether it shows the need, its facet or a new facet, the steps and why |
+| 7. record | the verdicts join the state; the round's new findings decide whether it counts as quiet (section 18.5) |
+
+`hunt-propose` works in the workspace with write access and a shell, alone; `hunt-verify` only reads it.
+A trajectory that got no verdict, because a call failed, refused or left it out, or because its verdict names a facet `facets.json` lacks, stays unread and is listed in the round's record.
+
+### 18.4 Draws
+
+A round reads `reads_per_round` trajectories, none of them read before; a trajectory is read once in a run.
+`hit_share` of the reads go to trajectories the active probes hit: every probe with unread hits gets `min_reads_per_probe` reads first, the probes with the fewest read hits first, and the rest is shared out in proportion to the unread hits by the largest remainders; within a probe, the reads go to trajectories of different kinds, the members nearest the centres of a clustering of its unread hits under the extracted features.
+Hit reads the hits cannot fill go to exploration.
+The other reads explore the trajectories no probe hits.
+Half of them are coverage reads: when a run starts, the trajectories are cut into `clusters` clusters under the extracted features, and every coverage read takes a random unread member of the cluster with the smallest share of read trajectories.
+The other half are random reads, drawn uniformly from the unread trajectories no probe hits; they alone carry the estimate of what the probes miss.
+
+### 18.5 Ledger and the end of the search
+
+`ledger.json` holds per probe its hits, the hits read, the hits confirmed, its precision with the Wilson interval at 95%, the unread hits with the number of them expected to be real, the hits no other probe has, and `revise` when at least `min_reads_per_probe` hits were read and the precision is below `min_precision`.
+A probe counts as right on a trajectory that shows the need, whatever step the verdict cites.
+It also holds the confirmed trajectories per facet, the record of every round, and the coverage: the trajectories and clusters read, and the misses.
+
+A round brings a new finding when a verdict confirms a facet that had no confirmed trajectory before, a facet a verdict reports as new included, or when it confirms a trajectory no probe hits, which only exploration reads can.
+A confirmed hit of a known facet, a probe tightened or rewritten, and a facet proposed that no verdict confirms bring none.
+Every round without a new finding adds one to `quiet`, and a round with one sets it to 0.
+The search ends when `quiet` reaches `patience`, or after `max_rounds` rounds; the report says which, as `converged`.
+
+The miss bound rests on the random reads of trajectories no active probe hits: with `m` confirmed among `n`, it is the one-sided Clopper-Pearson bound at 95% of the share missed, and that bound times the unread trajectories no probe hits is the number of real trajectories the probes may still miss.
+With the defaults, three quiet rounds hold 36 random reads, and none of them confirmed bounds the share missed below 8%.
+
+### 18.6 Closing and outputs
+
+After the last round, the closing check reads at most `final_reads` of the trajectories the active probes hit and no round read, those of the most precise probes first, then those more probes hit.
+Then the run writes:
+
+| Output | Content |
+|---|---|
+| `.traj/tables/hunt_findings.parquet` | one row per confirmed trajectory: `hunt`, `facet`, `step`, the first step where it shows, `steps`, `why`, `round`, `source` (hit, coverage, random or final) and `probes`; a run replaces the rows of its hunt |
+| `hunts/<name>/` | `facets.yaml`, `probes.yaml` with every active probe's counts, and the probe files; the next run of the hunt starts from them |
+| `.traj/hunts/<name>/<run>/report.json` | whether the search converged, the rounds, the facets with their confirmed trajectories, the ledger of every probe, the coverage with the miss bound, the unread hits of every active probe, the closing check, and the record of every round |
+
+`traj view` shows `hunt_findings` with the other tables.
+The state after every round is `.traj/hunts/<name>/<run>/state/<round>.json`, and the clusters are `clusters.json` of the run.
+A run without `report.json` continues from its last state when the hunt runs again, and the calls it made are answered from the mailbox, since every request holds the digests of the files it builds on and the draws follow the seed; a run with `report.json` is finished, and the next one gets a new number.
+
+### 18.7 Workspace
+
+| Path | Content |
+|---|---|
+| `need.md` | the need |
+| `trajectories/<dataset>/<id>.md` | links to the rendered trajectories of the hunt |
+| `tables/<name>.parquet` | every table of the project restricted to the trajectories of the hunt, the hidden metadata left out, and `contents`, the whole text of every step with the parsed arguments of tool calls, which the steps table cuts |
+| `query.py`, `README.md` | the query script of mining, and a description of every file and table with queries that help write probes |
+| `scenario.md` | `.traj/mining/scenario.md`, when a mining round wrote it |
+| `facets.json`, `probes.json`, `probes/`, `ledger.json`, `findings.json` | the state as the next proposal reads it |
+| `rounds/<round>/hits.parquet`, `rounds/<round>/verdicts.json`, `rounds/<round>/cases/` | every position the probes hit, every trajectory read with its verdict, and the files read, whole |
+| `operators/` | `schema.py`, `base.py`, `tables.py`, `rules.py`, the event rules of the library as `example_rules.py`, the operator that returns them as `example_operator.py`, and the operator files of code probes |
+| `notes/` | the notes of every proposal, `notes/hunt-propose-<round>.md` |
+
+A proposal that runs again because the one before was stopped before it submitted starts without its notes and without the operator files the driver did not place.
+
+### 18.8 Limits
+
+- One model gives every verdict, and a trajectory read once is not read again in the run, so a verdict given before a facet existed stays as it was.
+- The miss bound covers the trajectories no probe hits; a real trajectory among the hits of a probe is counted by the probe's precision, which rests on the hits read.
+- Probes run in the project's environment without isolation; a SQL probe is one `SELECT`, and it can read any file DuckDB can.
+- The clusters and the diversity of the hit reads rest on the extracted features, so `traj extract` runs before a hunt.
+
 ## Appendix
 
 ### A. What chunks are for
@@ -1131,3 +1267,5 @@ The outputs of `tests/data/operators/fixture/outcome.py` match those records, an
 A replayed function writes no files of its own, so the test covers the files the driver writes to the workspace and leaves out `notes/`.
 A recording is named by the hash of the call's function, request and instruction, and its event file is empty, since the worker reads only the submission.
 The test replays the whole round, including a candidate that was revised for noise and rejected again.
+`tests/data/hunting/weather_calls.py` is a code probe that finds the calls of the weather tools in the Toucan sample, at the same positions as a SQL probe of the tests.
+`tests/data/hunting/replay/` holds the accepted submission of every call of one real hunt over the 30 Toucan and 40 UltraChat conversations, three proposals and six reading calls; the test replays its three rounds to convergence and continues a run stopped after round 2 from its state, with every call answered from the mailbox.

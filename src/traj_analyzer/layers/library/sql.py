@@ -34,16 +34,10 @@ QUERIES = pa.schema([
 ])
 
 
-def _sql_arguments(content: str) -> list[tuple[str, str]]:
-    text = content.lstrip()
-    if not text.startswith("{"):
+def _sql_arguments(text: str) -> list[tuple[str, str]]:
+    if not text.lstrip().startswith("{"):
         return []
-    try:
-        arguments = json.loads(content)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(arguments, dict):
-        return []
+    arguments = json.loads(text)
     return [(key, arguments[key]) for key in SQL_KEYS if isinstance(arguments.get(key), str) and arguments[key].strip()]
 
 
@@ -52,7 +46,7 @@ def compute(trajectory: Trajectory, tables: Tables, harness: Harness) -> dict[st
     for step in trajectory.steps:
         if step.kind != "tool_call":
             continue
-        for argument, text in _sql_arguments(step.content):
+        for argument, text in _sql_arguments(step.arguments if step.arguments is not None else step.content):
             tree = parse(text, DIALECT)
             row: dict[str, Any] = {"step": step.index, "tool": step.name, "argument": argument,
                                    "parsed": tree is not None, "text": text}

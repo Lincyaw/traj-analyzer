@@ -17,6 +17,7 @@ from traj_analyzer.anomalies import context_frame, context_names, run_anomalies,
 from traj_analyzer.evaluation import evaluate, load_evaluation, reference_keys
 from traj_analyzer.extract import coverage, extract
 from traj_analyzer.files import parse_yaml
+from traj_analyzer.hunting import hunt
 from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.labels import labels_report
 from traj_analyzer.layers import describe_tables, discover_layers, enabled_layers
@@ -313,7 +314,7 @@ def cmd_evaluate(workers: Workers = None) -> None:
 @app.command("anomalies")
 def cmd_anomalies() -> None:
     """Compare every batch with the baseline inside every stratum, score every trajectory, and write the shifts,
-    the lifts and the anomalies as tables."""
+    the lifts, the oversight and the anomalies as tables."""
     _emit(run_anomalies(Project.find()))
 
 
@@ -339,6 +340,18 @@ def cmd_mine(rounds: Annotated[int, typer.Option(min=1, help="At most this many 
     """Propose features from the trajectories, check them, and enable the accepted ones."""
     reports = mine(Project.find(), rounds=rounds, workers=workers)
     _emit({"rounds": [report.model_dump(mode="json") for report in reports]})
+
+
+@app.command("hunt")
+def cmd_hunt(
+    name: Annotated[str, typer.Argument(help="A hunt of the project, hunts/<name>.yaml.")],
+    max_rounds: Annotated[int | None, typer.Option(min=1, help="At most this many rounds; default from the "
+                                                               "hunt.")] = None,
+    workers: Workers = None,
+) -> None:
+    """Search the trajectories for what a hunt asks for: propose probes, read what they hit and a sample of what they
+    miss, and refine them until rounds in a row find nothing new."""
+    _emit(hunt(Project.find(), name, max_rounds=max_rounds, workers=workers))
 
 
 @app.command("try")

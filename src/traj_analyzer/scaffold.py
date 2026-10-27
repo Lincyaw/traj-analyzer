@@ -5,7 +5,6 @@ from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
-
 # Packaging drops files whose names start with a dot, so templates store these without it.
 _DOTTED = {"gitignore": ".gitignore", "claude": ".claude"}
 

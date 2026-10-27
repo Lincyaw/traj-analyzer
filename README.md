@@ -14,7 +14,7 @@ uv run python -m aifn install --dsh-home ~/.dsh
 export DEEPSEEK_API_KEY=...
 ```
 
-The second command installs the aifn harness bundle into the dsh home, which runs the judgment calls and the mining functions.
+The second command installs the aifn harness bundle into the dsh home, which runs the judgment calls and the functions of mining and hunts.
 
 ## Usage
 
@@ -36,6 +36,7 @@ traj view
 traj sample
 traj evaluate
 traj mine
+traj hunt reward-hacking
 ```
 
 The `traj.yaml` created by `traj init` enables every general operator of the built-in library: the code operators over the steps and the actions, the generic event rules, the signals of the user's reaction and the end state, and the seven judgment operators of the `dialogue` call group.
@@ -53,6 +54,11 @@ Launch either agent in the analysis project to define features or write reports.
 `traj evaluate` measures every enabled feature for noise, variation and dependence and gives it a role: distinguishing, invariant or dependent; with labels declared it also checks the signals and the anomalies against them.
 `traj mine` finds new features: agents describe the scenario of the data, reason from it to measures and expectations that may matter, test those hypotheses against the trajectories and their tables, write the findings as features or event rules and review them; each candidate is then checked for noise, for how its values spread over the batches, and for whether its tail is worth a look, and the accepted ones are enabled.
 Both need `evaluation.model` in `traj.yaml`, a second model that measures judgment features again; the "Feature evaluation and mining" section of the design describes them.
+
+`traj hunt <name>` looks for every trajectory that shows what `hunts/<name>.yaml` asks for in its `need`, such as reward hacking or a destructive command nobody asked for.
+Each round, an agent proposes probes, SQL queries or operator files that find positions mechanically; the probes run over every trajectory; agents read a sample of what they hit and of what they miss; and the verdicts tell the next proposal which probes to tighten and which misses to catch.
+The search ends when `patience` rounds in a row, 3 by default, confirm no new kind of behaviour and no trajectory the probes miss.
+The confirmed trajectories go to the table `hunt_findings`, and the probes to `hunts/<name>/`, where the next run starts from them; the "Hunts" section of the design describes the rounds, the draws and the bound on what the probes may still miss.
 
 `traj view` serves the review pages at http://127.0.0.1:8000: the batches with their oversight metrics and the features that moved, the trajectories most anomalous first with one line saying why, one trajectory's course turn by turn with its steps and the reasons it stands out, and the features with how they hold up; verdicts recorded there go to `reviews/verdicts.jsonl`.
 The `Data` page keeps the searchable tables and the Perspective charts for other analyses.

@@ -24,13 +24,14 @@ from traj_analyzer.mining.functions import (
     SURVEY,
     define_instruction,
     explore_instruction,
+    functions,
     hypothesize_instruction,
     operator_guide,
     review_instruction,
     survey_instruction,
 )
 from traj_analyzer.mining.report import RoundReport
-from traj_analyzer.mining.session import Session
+from traj_analyzer.mining.session import WORKSPACE, Session
 from traj_analyzer.mining.workspace import prepare_workspace
 from traj_analyzer.operators.catalog import load_groups
 from traj_analyzer.project import ConfigError, Project
@@ -72,6 +73,7 @@ def run_round(project: Project, *, workers: int | None, runner: WorkerRunner) ->
     held_out = evaluation.held_out()
     session = Session(
         project=project, runner=runner, workers=workers, box=mailbox(project), known=known_calls(mailbox(project)),
+        functions=functions(project), workspace=directory / WORKSPACE,
         number=number, directory=directory, rows={row.key: row for row in rows}, reference=reference,
         chosen=evaluation.evaluation_set, readable=[key for key in reference if key not in held_out],
         context=context_frame(project, groups, rows, evaluation.context()))

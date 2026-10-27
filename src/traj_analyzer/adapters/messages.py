@@ -44,9 +44,10 @@ class _Parse:
     steps: list[Step] = field(default_factory=list)
     tool_names: dict[str, str] = field(default_factory=dict)
 
-    def add(self, role: Role, kind: Kind, content: str, name: str | None = None, is_error: bool = False) -> None:
+    def add(self, role: Role, kind: Kind, content: str, name: str | None = None, is_error: bool = False,
+            arguments: str | None = None) -> None:
         self.steps.append(Step(index=len(self.steps), role=role, kind=kind, content=content, name=name,
-                               is_error=is_error))
+                               is_error=is_error, arguments=arguments))
 
 
 class MessagesAdapter:
@@ -59,6 +60,8 @@ class MessagesAdapter:
     Message keys other than the known ones are an error unless listed in `ignore_keys`; keys whose value is null count
     as absent.
     `tool_call_format` says how the content of a message mapped to kind `tool_call` encodes the tool name.
+    With `json` or `python_literal` the step keeps that text as its content and holds the call's arguments in
+    `arguments`.
     A record whose message list is null or empty is an error unless `skip_empty` is set.
     """
 
@@ -159,10 +162,12 @@ class MessagesAdapter:
         return str(message["name"]) if "name" in message else None
 
     def _text(self, parse: _Parse, mapping: RoleMapping, text: str, name: str | None) -> None:
+        arguments = None
         if mapping.kind == "tool_call" and self.tool_call_format != "text":
             parsed = json.loads(text) if self.tool_call_format == "json" else ast.literal_eval(text)
             name = parsed["name"]
-        parse.add(mapping.role, mapping.kind, text, name=name)
+            arguments = _call_arguments(parsed["arguments"])
+        parse.add(mapping.role, mapping.kind, text, name=name, arguments=arguments)
 
     def _parts(self, parse: _Parse, mapping: RoleMapping, parts: list[dict[str, Any]], name: str | None) -> None:
         texts: list[str] = []
@@ -202,6 +207,15 @@ def _arguments(arguments: Any) -> str:
     if arguments is None:
         return ""
     return arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+
+
+def _call_arguments(arguments: Any) -> str:
+    """The JSON text of the arguments of a call parsed from its text: a string as written, an object dumped."""
+    if isinstance(arguments, str):
+        return arguments
+    if isinstance(arguments, dict):
+        return json.dumps(arguments, ensure_ascii=False)
+    raise TypeError(f"tool call arguments must be a string or an object, got {type(arguments).__name__}")
 
 
 def _as_text(value: Any) -> str:

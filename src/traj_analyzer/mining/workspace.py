@@ -111,8 +111,14 @@ def prepare_workspace(session: Session, groups: list[Group], evaluation: Evaluat
 def _write_tables(session: Session) -> str:
     """Copy every table of the project into the workspace, restricted to the readable trajectories, with the
     hidden metadata left out; return the description of the tables."""
-    project = session.project
-    readable = pa.array(sorted(session.readable), pa.string())
+    return describe_tables(write_tables(session.project, session.readable, session.workspace / TABLES))
+
+
+def write_tables(project: Project, keys: list[str], directory: Path) -> dict[str, pa.Schema]:
+    """Copy every table of the project into `directory`, restricted to the trajectories of `keys`, with the hidden
+    metadata left out; return the schemas of the copies without the key column."""
+    directory.mkdir(parents=True, exist_ok=True)
+    readable = pa.array(sorted(keys), pa.string())
     patterns = project.config.render.hide_metadata
     schemas: dict[str, pa.Schema] = {}
     for name in table_names(project):
@@ -127,6 +133,6 @@ def _write_tables(session: Session) -> str:
                      for text in table["metadata"].to_pylist()]
             table = table.set_column(table.schema.get_field_index("metadata"), table.schema.field("metadata"),
                                      pa.array(shown, pa.string()))
-        pq.write_table(table, session.workspace / TABLES / f"{name}.parquet")
+        pq.write_table(table, directory / f"{name}.parquet")
         schemas[name] = pa.schema([field for field in table.schema if field.name != KEY])
-    return describe_tables(schemas)
+    return schemas

@@ -78,7 +78,8 @@ def calls_of(trajectory: Trajectory) -> list[Call]:
         if step.is_user_message:
             turn += 1
         elif step.kind == "tool_call":
-            call = Call(index=step.index, tool=step.name or "unnamed", arguments=step.content, turn=turn)
+            arguments = step.arguments if step.arguments is not None else step.content
+            call = Call(index=step.index, tool=step.name or "unnamed", arguments=arguments, turn=turn)
             found[step.index] = call
             pending.append((call, step.index))
         elif step.kind == "tool_result":
@@ -105,12 +106,7 @@ def _arguments(call: Call) -> dict[str, Any]:
     text = call.arguments.lstrip()
     if not text.startswith("{"):
         return {}
-    try:
-        parsed = json.loads(call.arguments)
-    except json.JSONDecodeError:
-        # Arguments are cut when stored by some releases, which leaves long ones as incomplete JSON.
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    return json.loads(call.arguments)
 
 
 def _string(arguments: dict[str, Any], keys: tuple[str, ...]) -> str | None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
@@ -116,6 +117,32 @@ def test_messages_adapter_reads_toucan_tool_calls() -> None:
     calls = [s for t in trajectories for s in t.steps if s.kind == "tool_call"]
     assert calls and all(s.name for s in calls)
     assert {s.role for t in trajectories for s in t.steps} == {"user", "assistant", "tool"}
+
+
+def test_messages_adapter_keeps_toucan_call_texts_and_parses_their_arguments(tmp_path: Path) -> None:
+    records = [json.loads(line) for line in (DATA / "toucan.jsonl").open(encoding="utf-8")]
+    written = [m["content"] for r in records for m in json.loads(r["messages"]) if m["role"] == "tool_call"]
+    trajectories = list(MessagesAdapter(**TOUCAN["options"]).read(DATA / "toucan.jsonl", "t"))
+    calls = [s for t in trajectories for s in t.steps if s.kind == "tool_call"]
+    assert [s.content for s in calls] == written
+    assert [s.arguments for s in calls] == [ast.literal_eval(text)["arguments"] for text in written]
+    assert all(isinstance(json.loads(s.arguments), dict) for s in calls)
+    assert all(s.arguments is None for t in trajectories for s in t.steps if s.kind != "tool_call")
+
+    # The same calls written as JSON, with the arguments as an object.
+    for record in records:
+        messages = json.loads(record["messages"])
+        for message in messages:
+            if message["role"] == "tool_call":
+                call = ast.literal_eval(message["content"])
+                message["content"] = json.dumps({"name": call["name"], "arguments": json.loads(call["arguments"])})
+        record["messages"] = json.dumps(messages)
+    path = tmp_path / "toucan.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+    options = {**TOUCAN["options"], "tool_call_format": "json"}
+    as_json = [s for t in MessagesAdapter(**options).read(path, "t") for s in t.steps if s.kind == "tool_call"]
+    assert [s.name for s in as_json] == [s.name for s in calls]
+    assert [json.loads(s.arguments) for s in as_json] == [json.loads(s.arguments) for s in calls]
 
 
 def test_messages_adapter_rejects_unmapped_roles() -> None:

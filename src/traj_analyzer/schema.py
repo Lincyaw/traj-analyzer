@@ -22,6 +22,9 @@ class Step(BaseModel):
     name: str | None = None
     is_error: bool = False
     timestamp: str | None = None
+    arguments: str | None = None
+    """The JSON text of the arguments of a `tool_call` step, set by an adapter that parses the call; None when the
+    content holds the arguments as written."""
 
     @property
     def is_user_message(self) -> bool:

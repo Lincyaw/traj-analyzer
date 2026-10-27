@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 
-from traj_analyzer.actions import Call, actions, classify, project_root, relate, role_of
+from test_pipeline import DATA, TOUCAN
+
+from traj_analyzer.actions import Call, actions, calls_of, classify, project_root, relate, role_of
+from traj_analyzer.adapters.messages import MessagesAdapter
 from traj_analyzer.harness import EMPTY, Harness, discover_harnesses
 from traj_analyzer.layers import discover_layers
 from traj_analyzer.layers.tables import STEPS, Tables, steps_rows
@@ -67,6 +71,16 @@ def test_relations_link_actions_by_their_objects() -> None:
     found = actions(CALLS, CLAUDE)
     kinds = {(r.kind, found[r.later].call, found[r.earlier].call) for r in relate(found)}
     assert ("seen", 5, 1) in kinds and ("verify", 7, 5) in kinds and ("undo", 9, 5) in kinds
+
+
+def test_actions_of_toucan_calls_read_the_arguments_the_adapter_parsed() -> None:
+    # The tools of the Word document server in the Toucan data name the document in `filename`.
+    prefix = "office-word-document-server-"
+    word = Harness(name="word", mcp_prefixes=(prefix,), path_keys=("filename",))
+    found = [(action.act, action.paths)
+             for trajectory in MessagesAdapter(**TOUCAN["options"]).read(DATA / "toucan.jsonl", "t")
+             for action in actions(calls_of(trajectory), word) if action.tool.startswith(prefix)]
+    assert Counter(found) == {("mcp", ("Q1_2024_Sales_Report.docx",)): 8, ("mcp", ("Q3_Sales_Report.docx",)): 5}
 
 
 def test_classify_reads_results() -> None:

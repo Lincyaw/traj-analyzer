@@ -667,7 +667,7 @@ def _plain_values(frame: Frame, column: str, spec: FeatureSpec) -> pd.Series:
 def _unit_of(column: str, spec: FeatureSpec) -> str:
     """How a column's mean reads: `share` for a boolean, a label or a feature ranging from 0 to 1, else `number`."""
     if column != spec.name or spec.type == "boolean" or spec.range == (0, 1):
-        return "share" if not (column == f"{spec.name}__unrecovered") else "number"
+        return "share" if column != f"{spec.name}__unrecovered" else "number"
     return "number"
 
 
