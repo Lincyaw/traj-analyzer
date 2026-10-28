@@ -37,18 +37,35 @@ class Steps:
                                is_error=is_error, timestamp=turn.get("timestamp"), arguments=arguments,
                                source_step=turn["step_id"]))
 
-    def turn(self, turn: dict[str, Any]) -> None:
-        role = SOURCES[turn["source"]]
-        text = message_text(turn["message"])
-        if role == "user":
+    def message(self, turn: dict[str, Any]) -> None:
+        """The message of a turn of the person. A part the harness inserted becomes a notice step of its own, so
+        the message the person wrote opens a turn even where the harness wrote beside it; `single_prompt` makes
+        every part a notice once the agent has answered."""
+        pending: list[str] = []
+
+        def flush() -> None:
+            if pending:
+                self.add("user", "message", "\n".join(pending), turn)
+                pending.clear()
+
+        for text in message_parts(turn["message"]):
             if (self.single_prompt and self.answered) or any(p.match(text) for p in self.notices):
+                flush()
                 self.add("user", "notice", text, turn, name=INJECTED)
             else:
-                self.add("user", "message", text, turn)
-        elif self.include_thinking and turn.get("reasoning_content"):
-            self.add(role, "thinking", turn["reasoning_content"], turn)
-        if role != "user" and text:
-            self.add(role, "message", text, turn)
+                pending.append(text)
+        flush()
+
+    def turn(self, turn: dict[str, Any]) -> None:
+        role = SOURCES[turn["source"]]
+        if role == "user":
+            self.message(turn)
+        else:
+            if self.include_thinking and turn.get("reasoning_content"):
+                self.add(role, "thinking", turn["reasoning_content"], turn)
+            text = message_text(turn["message"])
+            if text:
+                self.add(role, "message", text, turn)
         for call in turn.get("tool_calls") or []:
             arguments = json.dumps(call["arguments"], ensure_ascii=False, sort_keys=True)
             self.tools[call["tool_call_id"]] = call["function_name"]
@@ -61,23 +78,27 @@ class Steps:
             self.answered = True
 
 
-def message_text(message: Any) -> str:
-    """The text of an ATIF message or observation content: a string, or a list of content parts where a part of
-    media stands as a placeholder, since the format names media by path or URL and no text of it is carried."""
+def message_parts(message: Any) -> list[str]:
+    """The parts of an ATIF message or observation content: one part for a string, else one per content part,
+    where a part of media stands as a placeholder, since the format names media by path or URL and carries no
+    text of it. A producer gives one part per part of the message the client sent, which is what lets a pattern
+    recognise the part the harness inserted beside the one the person wrote."""
     if message is None:
-        return ""
+        return []
     if isinstance(message, str):
-        return message
+        return [message]
     parts = []
     for part in message:
         kind = part["type"]
         if kind == "text":
             parts.append(part["text"])
-        elif kind in PLACEHOLDERS:
-            parts.append(PLACEHOLDERS[kind])
         else:
-            parts.append(f"[{kind}]")
-    return "\n".join(parts)
+            parts.append(PLACEHOLDERS.get(kind, f"[{kind}]"))
+    return parts
+
+
+def message_text(message: Any) -> str:
+    return "\n".join(message_parts(message))
 
 
 def flatten(document: dict[str, Any], notices: list[re.Pattern[str]], single_prompt: bool,
