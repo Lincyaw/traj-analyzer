@@ -47,6 +47,8 @@ class RoundRecord(BaseModel):
     round: int
     reads: dict[str, int] = Field(default_factory=dict)
     """Trajectories read, by why they were drawn."""
+    blind: int = 0
+    """Hit reads read once more by readers not shown the hits."""
     unanswered: list[str] = Field(default_factory=list)
     """Trajectories drawn whose case got no verdict; they stay unread."""
     failed: list[str] = Field(default_factory=list)
@@ -71,6 +73,9 @@ class HuntState(BaseModel):
     """Per active probe, the trajectories it hit in the last round."""
     readings: dict[str, Reading] = Field(default_factory=dict)
     """Per trajectory read, what was found."""
+    blind: list[Reading] = Field(default_factory=list)
+    """Second reads of trajectories a probe hit, by readers not shown the hits; they count toward no probe and no
+    finding, and only say how much the hits sway the verdicts."""
     rounds: list[RoundRecord] = Field(default_factory=list)
 
     def active(self) -> list[ProbeState]:
@@ -161,6 +166,30 @@ def ledger(state: HuntState, spec: HuntSpec, keys: list[str], clusters: dict[str
         "facets": [{"name": name, "found": count} for name, count in facets.items()],
         "rounds": [record.model_dump(mode="json") for record in state.rounds],
         "coverage": coverage(state, keys, clusters),
+    }
+
+
+def calibration(state: HuntState) -> dict[str, Any]:
+    """How the verdicts on trajectories a probe hit change when the reader is not shown the hits: per pair of a read
+    with the hits and a blind read of the same trajectory, whether both found the need, and every pair that differs.
+
+    Far more findings with the hits than without them means the hits sway the readers; a blind read can also miss
+    what the hits point to in a long trajectory, so every differing pair is listed for a person to settle.
+    """
+    pairs = [(state.readings[blind.key], blind) for blind in state.blind if blind.key in state.readings]
+    differ = [{"key": shown.key, "round": shown.round,
+               "shown": {"found": shown.found, "facet": shown.facet, "steps": shown.steps, "why": shown.why},
+               "blind": {"found": blind.found, "facet": blind.facet, "steps": blind.steps, "why": blind.why}}
+              for shown, blind in pairs if (shown.found, shown.facet) != (blind.found, blind.facet)]
+    both = sum(shown.found and blind.found for shown, blind in pairs)
+    return {
+        "pairs": len(pairs),
+        "found_shown": sum(shown.found for shown, _ in pairs),
+        "found_blind": sum(blind.found for _, blind in pairs),
+        "found_both": both,
+        "same_facet": sum(shown.found and blind.found and shown.facet == blind.facet for shown, blind in pairs),
+        "agreement": round(1 - len(differ) / len(pairs), 4) if pairs else None,
+        "differ": differ,
     }
 
 

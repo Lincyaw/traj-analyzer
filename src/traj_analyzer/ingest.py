@@ -5,6 +5,7 @@ import glob
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -46,14 +47,29 @@ def _ingest_one(project: Project, name: str) -> int:
     adapter = load_adapter(config.adapter, config.options, project.root)
     project.dataset_dir(name).mkdir(parents=True, exist_ok=True)
     rows: dict[str, IndexRow] = {}
+    lacking: list[str] = []
     for path in input_files(config, project.root):
         for trajectory in adapter.read(path, name):
             trajectory = trajectory.model_copy(update={"id": safe_id(trajectory.id)})
             if trajectory.id in rows:
                 raise ValueError(f"Duplicate trajectory id {trajectory.id} in {path}")
+            missing = unparsed_calls(trajectory)
+            if missing:
+                lacking.append(f"{trajectory.key}: {dict(missing)}")
             rows[trajectory.id] = _write(project, trajectory, config.description)
+    if lacking:
+        raise ValueError(f"{len(lacking)} trajectories of {name} lack tool calls the source records, by tool and "
+                         f"count: {lacking[:10]}")
     write_jsonl(project.dataset_dir(name) / INDEX_FILE, (row.model_dump_json() for row in rows.values()))
     return len(rows)
+
+
+def unparsed_calls(trajectory: Trajectory) -> Counter[str]:
+    """The calls the source records that the steps of the trajectory lack, counted by tool."""
+    if trajectory.recorded_calls is None:
+        return Counter()
+    parsed = Counter(step.name or "" for step in trajectory.steps if step.kind == "tool_call")
+    return Counter(trajectory.recorded_calls) - parsed
 
 
 def input_files(config: DatasetConfig, root: Path) -> Iterator[Path]:
@@ -90,6 +106,13 @@ def _write(project: Project, trajectory: Trajectory, description: str) -> IndexR
 
 def _is_scalar(value: Any) -> bool:
     return value is None or isinstance(value, str | int | float | bool)
+
+
+def visible_metadata(text: str, patterns: list[str]) -> str:
+    """The metadata of the trajectories table, JSON text, without the keys `render.hide_metadata` keeps from models."""
+    shown = {key: value for key, value in json.loads(text).items()
+             if not any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)}
+    return json.dumps(shown, ensure_ascii=False, sort_keys=True)
 
 
 def render_markdown(trajectory: Trajectory, render: RenderConfig, description: str = "") -> tuple[str, int]:

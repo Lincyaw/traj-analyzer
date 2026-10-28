@@ -1,9 +1,11 @@
-// The review pages: the batches, the trajectories worth a look, one trajectory's course, and the features.
+// The review pages: the batches, the trajectories worth a look, one trajectory's course, the features, and the
+// hunts with the trajectories they found and marked.
 // The address holds the page and its parameters, so any view can be shared as a link.
 
 import { get } from "./api.js";
 import { clear, el } from "./dom.js";
 import * as features from "./views/features.js";
+import * as hunts from "./views/hunts.js";
 import * as overview from "./views/overview.js";
 import * as trajectories from "./views/trajectories.js";
 import * as trajectory from "./views/trajectory.js";
@@ -12,6 +14,7 @@ const PAGES = [
   { id: "overview", title: "Overview", view: overview },
   { id: "trajectories", title: "Trajectories", view: trajectories },
   { id: "features", title: "Features", view: features },
+  { id: "hunts", title: "Hunts", view: hunts },
 ];
 const DETAIL = { id: "trajectory", view: trajectory };
 

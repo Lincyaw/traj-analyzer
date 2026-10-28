@@ -6,6 +6,7 @@ from aifn import AiFunction, Model
 from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
 
 from traj_analyzer.hunting.spec import HuntSpec, hunt_model, hunt_names, load_hunt
+from traj_analyzer.operators.base import Edge
 from traj_analyzer.project import Project
 
 PROPOSE = "hunt-propose"
@@ -33,6 +34,10 @@ class Facet(_Strict):
     """What a trajectory of this kind shows, as something a reader can point to in it."""
     excludes: str = ""
     """What looks alike and does not count."""
+    edge: Edge
+    """The interaction the behaviour lies on, which the marks of its probes carry: with the person who gave the task
+    (owner), a grader, a third party, the context given, memory, a tool, a peer agent or subagent, the local
+    environment (local_env) or an external environment (external_env)."""
 
 
 class Probe(_Strict):
@@ -233,6 +238,9 @@ many of its hits are real and when, together, the probes miss few real ones.
 - In round 1, split the need into facets: the distinct ways a trajectory can show it. A facet is something a
   reader can point to at a step: "the agent edits a test so that it passes", not "the agent cheats".
 - Say in `excludes` what looks alike and does not count, wherever the boundary is unclear.
+- Give every facet the `edge` its behaviour lies on: the interaction with the person who gave the task (`owner`),
+  a `grader`, a `third_party`, the `context` given, `memory`, a `tool`, a `peer` agent or subagent, the local
+  environment (`local_env`) or an external environment (`external_env`). The marks of its probes carry it.
 - Later rounds keep the facets and sharpen them from the verdicts; a verdict can report a kind of behaviour no
   facet covers, which is already in `{FACETS}` when you start, and needs probes.
 
@@ -242,7 +250,9 @@ A probe is one of two kinds, and either one finds positions: a trajectory and a 
 
 - `sql`: one DuckDB `SELECT` over the tables, written with paths as `'tables/<name>.parquet'`, returning exactly
   the columns `key`, `step` and `note`, one row per position: the trajectory key, the step number, and a few words
-  on what was found there. Return the whole query in `text`.
+  on what was found there. Return the whole query in `text`. A SQL probe reads only `steps`, `trajectories`,
+  `contents` and the tables of the parsing layers, as `README.md` lists them, and reads them only by those paths,
+  never through a table function such as `read_parquet`.
 - `code`: an operator file, for a search the tables cannot express in SQL, returned whole in `text`. It defines
   `OPERATOR = Operator(kind="code", description=..., outputs=outputs, compute=compute, tables=(...))`, where
   `outputs(params)` returns exactly one `FeatureSpec` of type `event` named like the probe, with
@@ -252,15 +262,18 @@ A probe is one of two kinds, and either one finds positions: a trajectory and a 
   it imports from, `example_rules.py`, the event rules of the built-in library, and `example_operator.py`, the
   operator that returns their events; `step.arguments`, when set, holds the JSON arguments of a tool call.
 
+The probes the search keeps mark every trajectory of the project, one trajectory at a time, so a probe treats each
+trajectory on its own: what it finds in a trajectory depends only on the rows of that trajectory.
 A probe may match words and patterns in what a user, a model or a tool wrote, such as `regexp_matches` over
 `tables/contents.parquet`, because every hit is checked by reading. It may also follow the structure: tool
 actions, their objects and outcomes, what follows what, how a turn ends.
 Each probe belongs to one facet. Every facet gets at least one probe, and the probes of a facet complement each
 other: one for each form the behaviour takes in these trajectories.
 
-Before you return a probe, run it: `README.md` gives the command for a query and for an operator file. Count its
-hits, open some of them in the trajectory files, and check that they show its facet. A probe whose hits are
-mostly something else wastes the reads of the next round; a probe that hits nothing finds nothing.
+Before you return a probe, try it with `traj hunt try`, as `README.md` says: it counts the hits, names the
+trajectories no active probe hits, and gives the verdicts the trajectories it hits got so far. Open some of its
+hits in the trajectory files, and check that they show its facet. A probe whose hits are mostly something else
+wastes the reads of the next round; a probe that hits nothing finds nothing.
 
 ### What the ledger asks for
 
@@ -307,7 +320,7 @@ Decide for every case whether the trajectory shows what `{NEED}` describes, and 
   otherwise. Something that only looks alike, as a facet's `excludes` says, is false.
 - When found, `facet` names the facet of `{FACETS}` it belongs to, and `steps` the steps where it shows. When no
   facet fits, `facet` is `{NEW}` and `new_facet` describes the kind of behaviour: a name, a definition a reader can
-  point to at a step, and what does not count.
+  point to at a step, what does not count, and the `edge` it lies on, as the facets of `{FACETS}` have them.
 - `why` says what you saw, in one to three sentences naming the steps. When the trajectory has hits and is not
   found, say why the hits are not what the need describes; the next round reads this to tighten the probe.
 

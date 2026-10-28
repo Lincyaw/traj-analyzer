@@ -9,8 +9,9 @@ from typing import Any
 from aifn import Access, AiFunction, Handle, Mailbox, Workspace
 from pydantic import BaseModel
 
-from traj_analyzer.extract import WorkerRunner, issue_call
+from traj_analyzer.extract import WorkerRunner
 from traj_analyzer.project import Project
+from traj_analyzer.runtime import issue_call
 
 
 @dataclass(kw_only=True)
@@ -21,6 +22,7 @@ class WorkspaceCalls:
     project: Project
     runner: WorkerRunner
     workers: int | None
+    """Workers that run side by side, never more than the calls left; None runs one per call left."""
     box: Mailbox
     known: dict[str, str]
     functions: dict[str, AiFunction[Any, Any]]
@@ -31,9 +33,9 @@ class WorkspaceCalls:
 
     def settle(self, handles: list[Handle[Any]]) -> list[Any]:
         """Run workers until every call has a conclusion, and return the conclusions in order."""
-        if any(handle.poll() is None for handle in handles):
-            self.runner.run(self.project, self.workers or self.project.config.extract.workers,
-                            frozenset(self.functions))
+        open_calls = sum(handle.poll() is None for handle in handles)
+        if open_calls:
+            self.runner.run(self.project, min(open_calls, self.workers or open_calls), frozenset(self.functions))
         results = [handle.poll() for handle in handles]
         if any(result is None for result in results):
             raise RuntimeError("aifn workers exited with calls left without a conclusion; a call claimed by a "

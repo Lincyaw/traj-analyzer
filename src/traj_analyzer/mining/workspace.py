@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import fnmatch
-import json
 import shutil
 import sys
 from pathlib import Path
@@ -15,6 +14,7 @@ from traj_analyzer.evaluation import CONTEXT_OPERATOR, Evaluation
 from traj_analyzer.events import library as rules_library
 from traj_analyzer.events import rules as rules_module
 from traj_analyzer.features.table import KEY
+from traj_analyzer.ingest import visible_metadata
 from traj_analyzer.layers import describe_tables, read_table, table_names
 from traj_analyzer.layers import tables as tables_module
 from traj_analyzer.mining.functions import CHECKS, SCENARIO
@@ -127,10 +127,7 @@ def write_tables(project: Project, keys: list[str], directory: Path) -> dict[str
             continue
         table = table.filter(pc.is_in(table[KEY], value_set=readable))
         if name == "trajectories":
-            shown = [json.dumps({k: v for k, v in json.loads(text).items()
-                                 if not any(fnmatch.fnmatchcase(k, p) for p in patterns)},
-                                ensure_ascii=False, sort_keys=True)
-                     for text in table["metadata"].to_pylist()]
+            shown = [visible_metadata(text, patterns) for text in table["metadata"].to_pylist()]
             table = table.set_column(table.schema.get_field_index("metadata"), table.schema.field("metadata"),
                                      pa.array(shown, pa.string()))
         pq.write_table(table, directory / f"{name}.parquet")

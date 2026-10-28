@@ -15,12 +15,13 @@ from traj_analyzer.hunting.driver import (
     WORKSPACE,
     Answers,
     Hunt,
+    Reads,
     begin_round,
     closing_draws,
     end_round,
     finish,
-    groups,
     last_run,
+    note,
     open_hunt,
     over,
     propose_request,
@@ -28,7 +29,7 @@ from traj_analyzer.hunting.driver import (
     resume,
     save_state,
     start,
-    write_cases,
+    write_reads,
     write_state,
 )
 from traj_analyzer.hunting.functions import (
@@ -48,13 +49,15 @@ from traj_analyzer.project import ConfigError, Project
 
 class Batch(BaseModel):
     """One group of cases one reader of an agent session reads: its cases, the instruction it follows, the file
-    holding its cases, and the file it writes its verdicts to; paths are relative to the workspace."""
+    holding its cases, and the file it writes its verdicts to; paths are relative to the workspace. A blind batch
+    reads trajectories a probe hit without their hits."""
 
     index: int
     cases: list[Case]
     instruction: str
     request: str
     answer: str
+    blind: bool = False
 
 
 class Pending(BaseModel):
@@ -64,7 +67,7 @@ class Pending(BaseModel):
     final: bool
     """Whether the round is the closing check."""
     state: HuntState
-    draws: list[Draw]
+    reads: Reads
     failed: dict[str, str]
     retired: list[str]
     batches: list[Batch]
@@ -86,7 +89,7 @@ def start_hunt(project: Project, name: str) -> dict[str, Any]:
     """Start a run of the hunt for an agent session, or continue the one in progress: prepare the workspace and
     write what the next step reads."""
     hunt = open_hunt(project, name, create=True)
-    prepare(project, hunt.workspace, hunt.spec, hunt.keys)
+    prepare(project, hunt.workspace, name, hunt.spec, hunt.keys)
     if not (hunt.directory / PENDING).is_file():
         state = resume(hunt.directory) or start(project, name)
         if not over(hunt.spec, state):
@@ -105,6 +108,7 @@ def open_proposal(hunt: Hunt, state: HuntState) -> None:
     write_file(hunt.workspace, f"{base}/proposal.schema.json", schema)
     write_file(hunt.workspace, f"{base}/propose.md", propose_instruction(hunt.spec, number, f"{base}/input.json")
                + answer_section(f"{base}/proposal.json", f"{base}/proposal.schema.json"))
+    note(hunt, number, "propose", "open")
 
 
 def submit_proposal(project: Project, name: str) -> dict[str, Any]:
@@ -121,6 +125,7 @@ def submit_proposal(project: Project, name: str) -> dict[str, Any]:
         raise ConfigError(f"{path} does not exist; write the proposal there, as {_base(number, False)}/propose.md "
                           f"says")
     proposal = _parse(proposal_model(hunt.spec.probes_max), path)
+    note(hunt, number, "propose", "done")
     failed, retired, draws = begin_round(hunt, state, proposal, number)
     open_verdicts(hunt, number, False, state, draws, failed, sorted(retired))
     return status(project, name)
@@ -136,26 +141,30 @@ def open_verdicts(
     answers = hunt.workspace / base / "answers"
     if answers.is_dir():
         shutil.rmtree(answers)
-    cases = write_cases(hunt, draws, base)
+    note(hunt, number, "close" if final else "read", "open")
+    reads = write_reads(hunt, draws, base, number)
     schema = f"{base}/verify.schema.json"
     write_file(hunt.workspace, schema, json.dumps(Verification.model_json_schema(), indent=1))
     batches = []
-    for index, chunk in enumerate(groups(hunt, cases)):
+    chunks = [*((chunk, False) for chunk in reads.groups), *((chunk, True) for chunk in reads.blind_groups)]
+    for index, (chunk, blind) in enumerate(chunks):
         request, answer = f"{base}/batches/{index}.json", f"{base}/answers/{index}.json"
         write_file(hunt.workspace, request, json.dumps(
-            {"hunt": hunt.name, "round": number, "cases": [case.model_dump(mode="json") for case in chunk]},
+            {"hunt": hunt.name, "round": number,
+             "cases": [case.model_dump(mode="json", exclude_defaults=True) for case in chunk]},
             ensure_ascii=False, indent=1))
         instruction = f"{base}/batches/{index}.md"
         write_file(hunt.workspace, instruction, verify_instruction(request) + answer_section(answer, schema))
-        batches.append(Batch(index=index, cases=chunk, instruction=instruction, request=request, answer=answer))
-    pending = Pending(round=number, final=final, state=state, draws=draws, failed=failed, retired=retired,
+        batches.append(Batch(index=index, cases=chunk, instruction=instruction, request=request, answer=answer,
+                             blind=blind))
+    pending = Pending(round=number, final=final, state=state, reads=reads, failed=failed, retired=retired,
                       batches=batches)
     (hunt.directory / PENDING).write_text(pending.model_dump_json(indent=1), encoding="utf-8")
 
 
 def submit_verdicts(project: Project, name: str) -> dict[str, Any]:
     """Take the verdicts the readers wrote for every group of the pending round and record the round; after the
-    closing check, write the findings, keep the probes and write the report."""
+    closing check, write the verdicts table, keep the probes, mark the trajectories and write the report."""
     hunt = open_hunt(project, name, create=False)
     path = hunt.directory / PENDING
     if not path.is_file():
@@ -167,6 +176,7 @@ def submit_verdicts(project: Project, name: str) -> dict[str, Any]:
                           f"instruction says")
     facets = {facet.name for facet in pending.state.facets}
     answers: Answers = []
+    blind: Answers = []
     for batch in pending.batches:
         verdicts = {verdict.file: verdict for verdict in _parse(Verification, hunt.workspace / batch.answer).verdicts}
         files = {case.file for case in batch.cases}
@@ -178,14 +188,15 @@ def submit_verdicts(project: Project, name: str) -> dict[str, Any]:
         if unknown:
             raise ConfigError(f"{batch.answer} names facets facets.json lacks: {unknown}; a new kind of behaviour "
                               f"is `{NEW}` with `new_facet`")
-        answers.append((batch.cases, verdicts, "the answer gave no verdict for it"))
-    cases = [case for batch in pending.batches for case in batch.cases]
-    readings, unanswered = record(pending.state, pending.draws, cases, answers, pending.round)
+        (blind if batch.blind else answers).append((batch.cases, verdicts, "the answer gave no verdict for it"))
+    readings, blind_readings, unanswered = record(pending.state, pending.reads, answers, blind, pending.round)
+    note(hunt, pending.round, "close" if pending.final else "read", "done")
     if pending.final:
-        finish(hunt, pending.state, readings, unanswered)
+        finish(hunt, pending.state, readings, blind_readings, unanswered)
         path.unlink()
         return status(project, name)
-    state = end_round(hunt, pending.state, pending.round, readings, unanswered, pending.failed, pending.retired)
+    state = end_round(hunt, pending.state, pending.round, readings, blind_readings, unanswered, pending.failed,
+                      pending.retired)
     save_state(hunt, state)
     path.unlink()
     if not over(hunt.spec, state):
@@ -203,7 +214,7 @@ def close_hunt(project: Project, name: str) -> dict[str, Any]:
                           f"nothing new or {hunt.spec.max_rounds} rounds have run; see `traj hunt status {name}`")
     draws = closing_draws(hunt, state)
     if not draws:
-        finish(hunt, state, [], [])
+        finish(hunt, state, [], [], [])
         return status(project, name)
     open_verdicts(hunt, state.round + 1, True, state.model_copy(deep=True), draws, {}, [])
     return status(project, name)

@@ -26,7 +26,8 @@ flowchart LR
     anomalies --> view
     tables -->|traj mine| mined[operators/mined, traj.yaml]
     mined --> features
-    tables -->|traj hunt| hunted[(hunt_findings, hunts/name)]
+    tables -->|traj hunt| hunted[(hunt_verdicts, hunts/name)]
+    hunted -->|hunt.marks| features
     hunted --> view
 ```
 
@@ -70,20 +71,20 @@ An analysis project is a git repository created by `traj init <dir>`:
 | `reports/*.md` | reports written by Codex or Claude Code | yes |
 | `reviews/verdicts.jsonl` | what people found on the trajectories a feature pointed to, written by `traj review` (section 16) | yes |
 | `hunts/<name>.yaml` | what a hunt looks for and how much it reads (section 18) | yes |
-| `hunts/<name>/` | the facets and probes the last run of the hunt kept, which the next run starts from | yes |
+| `hunts/<name>/` | the facets and probes the last run of the hunt kept, which the next run starts from and which mark every trajectory | yes |
 | `.claude/skills/` | shared skill content copied from the tool repository | yes |
 | `.agents/skills/<name>` | relative directory links to the shared skills for Codex | yes |
 | `.traj/datasets/<dataset>/` | `<id>.json`, `<id>.md`, `index.jsonl` | no |
 | `.traj/instructions/` | instruction files generated for call groups | no |
 | `.traj/mailbox/` | aifn tasks and conclusions, which also serve as the cache | no |
 | `.traj/features/<group>.parquet` | feature table | no |
-| `.traj/tables/<name>.parquet` | the tables of section 14: steps, trajectories, the layer tables, evidence, events, judgments, shifts, lifts, oversight, anomalies, and `hunt_findings` of section 18 | no |
+| `.traj/tables/<name>.parquet` | the tables of section 14: steps, trajectories, the layer tables, evidence, events, judgments, shifts, lifts, oversight, anomalies, and `hunt_verdicts` of section 18 | no |
 | `.traj/windows/<group>/<dataset>/<id>.<k>.md` | the rendered windows of a call group over windows | no |
 | `.traj/samples/<sampler>/<run>/selection.json` | sampling results | no |
 | `.traj/evaluation/` | second measurements per group and `features.json`, the result of `traj evaluate` | no |
 | `.traj/mining/<round>/` | the workspace, trial values and `report.json` of one mining round | no |
 | `.traj/mining/scenario.md` | what the trajectories are, as the last finished mining round described it | no |
-| `.traj/hunts/<name>/<run>/` | the workspace, the state after every round, the clusters, `pending.json` while a round of an agent session waits for its verdicts, and `report.json` of one run of a hunt | no |
+| `.traj/hunts/<name>/<run>/` | the workspace, the state after every round, the clusters, `timeline.jsonl`, `pending.json` while a round of an agent session waits for its verdicts, and `report.json` of one run of a hunt | no |
 
 `traj mine` writes the code operators it accepts to `operators/mined/<name>.py` and the judgment features it accepts to `traj.yaml`, so they are in git like every other operator.
 
@@ -99,6 +100,7 @@ Everything under `.traj/` can be regenerated from those files and the raw data.
 | | `metadata` | any key-value pairs, such as cwd, model, title or reward |
 | | `steps` | list of Step |
 | | `harness` | the harness that ran the agent, naming the profile of section 13.1 that reads its tool calls; empty when the adapter knows no harness |
+| | `recorded_calls` | the tools of the calls the source records apart from the conversation, such as the calls a recorder saw in the responses of the model; empty when the source records none |
 | Step | `index` | step number starting at 0 |
 | | `role` | `user`, `assistant`, `tool`, `system` |
 | | `kind` | `message`, `thinking`, `tool_call`, `tool_result`, `notice` |
@@ -118,6 +120,8 @@ An adapter is a Python file `<name>.py` that defines `ADAPTER`, the adapter clas
 Built-in adapters live in `traj_analyzer/adapters/` of the package, project adapters in `adapters/` of the analysis project, and a project adapter overrides a built-in adapter of the same name.
 In `traj.yaml`, `datasets` gives each dataset its adapter name, input globs, exclude globs, adapter options and a description; an adapter from an installed package is named as `module:Class`.
 `traj adapters list` shows every adapter and the datasets that use it.
+An adapter whose source records the calls of the agent apart from the conversation, such as a proxy that logs every response, gives their tools as `recorded_calls`.
+`traj ingest` checks that the steps of every such trajectory hold a `tool_call` of each recorded call, counted by tool, and stops with an error listing the trajectories that lack some, before it writes the index of the dataset; so a parser that loses calls is found when the data is read.
 
 The built-in `claude_code` adapter reads Claude Code session files.
 It reads `user` and `assistant` records in file order, so turns abandoned by a rewind stay in the trajectory.
@@ -399,6 +403,7 @@ Values returned by code operators are checked against the same types, and a fail
    The rows of the steps, trajectories and layer tables, the evidence and the events of the code features are collected and written once to `.traj/tables/` (section 14).
 4. For each judgment group, trajectories with no applicable instance, outside every feature's scope, or outside the group's sample get no model call; every other trajectory gets one task, or one per window, and tasks with an earlier conclusion reuse it.
 5. When tasks are outstanding, start `extract.workers` subprocesses `python -m aifn worker traj_analyzer.worker:make_worker --once`.
+   Before the first workers of a command start, the check of section 5.8 runs once.
    Workers find the project through the environment variable `TRAJ_PROJECT` and build the same functions from the same configuration; `TRAJ_FUNCTIONS` names the functions of the run, so the workers take only its calls and leave the calls other runs left pending alone.
    Workers exit when the queue is empty, and any worker exiting with a non-zero code stops the command with an error.
 6. Read every conclusion and write `.traj/features/<group>.parquet`, one row per trajectory with the column `key` and, per feature, the columns `<feature>`, `<feature>__status`, `<feature>__detail`, and `<feature>__evidence` when the group cites evidence.
@@ -447,6 +452,16 @@ A model behind an OpenAI-compatible endpoint is reached through a patch on the `
 
 The matching `engine` configuration is `provider: litellm`, `model: DeepSeek-V4-flash`, `env_passthrough: [LITELLM_API_KEY, LITELLM_BASE_URL]` and `patches: [engine/litellm.patch.yml]`.
 Endpoints and keys arrive through environment variables and are never written into project files.
+
+Every command that starts workers checks first that they can run calls, and `traj check` runs the same check alone:
+
+1. every variable of `engine.env_passthrough` is set, and every file of `engine.patches` exists;
+2. the dsh runtime under `dsh_home` has the version aifn requires, and the `sdk` profile holds a copy of the aifn bundle equal to the one aifn ships;
+3. one call of the function `traj-check`, with the access a call that writes to its workspace gets, runs `sha256sum token.txt` with the shell tool on a file of random content, and returns what it printed.
+
+The command stops with an error at the first item that fails, naming what to install or set.
+The third item reaches the endpoint with the key and the model of `engine`, and it finds a sandbox that refuses every command: such a sandbox does not make a call fail, the model goes on without the shell, and only the digest, which the model cannot give without running the command, shows that the shell ran.
+A call that only reads its workspace has no shell tool at all.
 
 ## 6. Sampling
 
@@ -568,7 +583,8 @@ The `traj-report` skill guides Codex or Claude Code through these steps:
 | Command | Purpose |
 |---|---|
 | `traj init <dir>` | create an analysis project with shared skills for Codex and Claude Code |
-| `traj ingest [dataset...]` | read raw data and write the unified and rendered files |
+| `traj ingest [dataset...]` | read raw data and write the unified and rendered files, checking the parsed calls against the calls the source records |
+| `traj check` | check that the workers can run model calls: the engine's variables and patches, the dsh runtime and the aifn bundle, and one call that runs a shell command in the sandbox of a call (section 5.8) |
 | `traj adapters list` | list built-in and project adapters and the datasets using them |
 | `traj layers list` | list built-in and project parsing layers, the tables and columns each writes, and which are enabled |
 | `traj operators list [--tag t] [--kind code\|judgment]` | list built-in and project operators and where they are enabled |
@@ -584,8 +600,10 @@ The `traj-report` skill guides Codex or Claude Code through these steps:
 | `traj tree <feature> [--dataset d] [--support s] [--by c] [--within c] [--top n]` | show a paths feature as a tree: the size of every level, where events are cut, and the most used nodes |
 | `traj evaluate [--workers n]` | measure noise, variation and dependence of every enabled feature, assign roles, report drift of the trajectories outside the reference set, and with labels declared, check the signals and the anomalies against them (section 17) |
 | `traj mine [--rounds n] [--workers n]` | describe the scenario, propose and test hypotheses about measures and expectations, check the resulting features, check their tails, and write the accepted ones to `operators/mined/` and `traj.yaml` |
-| `traj hunt run <name> [--max-rounds n] [--workers n]` | search the trajectories for what `hunts/<name>.yaml` asks for with aifn functions: propose probes, read what they hit and a sample of what they miss, and refine them until `patience` rounds in a row find nothing new; write the findings and keep the probes (section 18) |
-| `traj hunt start\|status\|propose\|verdicts\|close <name>` | the same search step by step, with an agent session proposing the probes and reading the cases (section 18.8) |
+| `traj hunt run <name> [--max-rounds n] [--workers n]` | search the trajectories for what `hunts/<name>.yaml` asks for with aifn functions: propose probes, read what they hit and a sample of what they miss, and refine them until `patience` rounds in a row find nothing new; write the verdicts, keep the probes and mark every trajectory with them (section 18) |
+| `traj hunt start\|status\|propose\|verdicts\|close <name>` | the same search step by step, with an agent session proposing the probes and reading the cases (section 18.9) |
+| `traj hunt try <name> <file>` | run a probe file over every trajectory of the hunt's last run and compare what it hits with the verdicts so far and the active probes; changes nothing (section 18.8) |
+| `traj hunt report <name> [--run n]` | what a finished run found, in brief: the rounds with their minutes, the facets, the batches, the probes, the coverage, how blind reads and people's verdicts agree, the marks, and where the files are (section 18.10) |
 | `traj try <file> [--key k]...` | compute a code operator file on the reference set and print how its values spread, the objection of the checks, and the value and evidence steps for every `--key`; changes nothing |
 | `traj review <key> --feature <name> [--step n] --worth\|--no-worth [--note text]` | record what a person found on a trajectory a feature pointed to, in `reviews/verdicts.jsonl`, and print the feature's human precision so far (section 16) |
 
@@ -1122,11 +1140,12 @@ These numbers check that the signals, the rules and the anomaly score are worth 
 A hunt looks for every trajectory that shows what a person asks for, such as an agent that makes a check pass without doing the task, or one that runs destructive commands nobody asked for.
 Features describe how batches differ, and the checks of mining keep a feature only when enough trajectories vary on it and no single project or model explains it, so a behaviour that a few trajectories show, or that one model shows, is rejected there.
 A hunt is judged by the trajectories it finds and by how many it may still miss.
-`traj hunt run <name>` runs one with aifn functions, and an agent session runs one step by step (section 18.8), in the package `traj_analyzer/hunting/`.
+`traj hunt run <name>` runs one with aifn functions, and an agent session runs one step by step (section 18.9), in the package `traj_analyzer/hunting/`.
+The probes a finished run keeps then mark every trajectory of the project, so a person sees which trajectory, and which step in it, is worth a look (section 18.7).
 
 ### 18.1 The hunt file
 
-`hunts/<name>.yaml` names a hunt; the name matches `[a-z][a-z0-9_-]{0,39}`.
+`hunts/<name>.yaml` names a hunt; the name matches `[a-z][a-z0-9_-]{0,34}`.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1138,10 +1157,12 @@ A hunt is judged by the trajectories it finds and by how many it may still miss.
 | `hit_share` | 0.6 | share of the reads of a round drawn from the hits of the probes |
 | `min_reads_per_probe` | 3 | reads every active probe with unread hits gets before the rest of the hit reads is shared out |
 | `cases_per_call` | 6 | trajectories one `hunt-verify` call reads |
+| `blind_reads` | 6 | hit reads of a round that other readers read once more without the hits (section 18.4) |
+| `workers` | one per call of the round | aifn workers that read side by side |
 | `clusters` | 40 | clusters of the trajectories the coverage reads go through |
 | `probes_max` | 20 | most active probes |
 | `min_precision` | 0.5 | precision below which the ledger asks for a probe to be revised |
-| `final_reads` | 120 | reads of the closing check |
+| `final_reads` | 120 | reads of the closing check; `all` reads every hit no round read |
 | `seed` | 0 | seed of the draws and the clusters |
 | `model` | `mining.model`, then `engine.model` | model of the two functions of the hunt |
 
@@ -1149,7 +1170,7 @@ Every hunt declares two aifn functions, `hunt-propose-<name>` and `hunt-verify-<
 
 ### 18.2 Facets and probes
 
-A facet is one way a trajectory can show the need, as something a reader can point to at a step, with what looks alike and does not count.
+A facet is one way a trajectory can show the need, as something a reader can point to at a step, with what looks alike and does not count, and the edge of section 15 its behaviour lies on, which the marks of its probes carry.
 A probe is a mechanical search that finds positions, a trajectory and a step, for one facet:
 
 | Kind | Form |
@@ -1157,23 +1178,27 @@ A probe is a mechanical search that finds positions, a trajectory and a step, fo
 | `sql` | one DuckDB `SELECT` over the tables of the workspace, returning exactly the columns `key`, `step` and `note` |
 | `code` | an operator file with one output of type `event` named like the probe; every event is a position |
 
+A SQL probe reads only the tables the marks compute for one trajectory: `steps`, `trajectories`, `contents` and the tables of the parsing layers.
+It names each as `'tables/<name>.parquet'`, which sqlglot finds in the query, and never through a table function such as `read_parquet`.
+What a probe finds in a trajectory depends only on the rows of that trajectory, because the marks run it on one trajectory at a time.
 A probe may match words and patterns in what a user, a model or a tool wrote, because every trajectory it hits is checked by reading.
-A probe whose query fails, returns other columns, more than one statement or a key of no trajectory of the hunt, or whose operator file fails or has another output, is `failed` for the round, with the error in the ledger.
+A probe whose query fails, reads another table, returns other columns, more than one statement or a key of no trajectory of the hunt, or whose operator file fails or has another output, is `failed` for the round, with the error in the ledger.
 
 ### 18.3 A round
 
 | Step | What it does |
 |---|---|
-| 1. propose | `hunt-propose` reads the need, the facets, the probes, the ledger, the findings and the verdicts of the round before, queries the tables and reads trajectories, and returns every facet and every probe of the next round, at most `probes_max`, with the reason for every probe it retires |
+| 1. propose | `hunt-propose` reads the need, the facets, the probes, the ledger, the findings and the verdicts of the round before, queries the tables, tries probes and reads trajectories, and returns every facet and every probe of the next round, at most `probes_max`, with the reason for every probe it retires; the proposal goes to `rounds/<round>/proposal.json` |
 | 2. apply | a probe returned with the text it had keeps its counts; a probe with a new text starts in this round; an active probe left out is retired; a facet with confirmed trajectories stays even when the proposal leaves it out |
 | 3. search | every active probe runs over every trajectory of the hunt; the positions go to `rounds/<round>/hits.parquet` |
 | 4. retire | an active probe with at least twice `min_reads_per_probe` hits read and none of them confirmed becomes `unproductive`; a proposal that returns it with the same text does not revive it |
 | 5. draw | section 18.4 |
-| 6. verify | `hunt-verify` reads the drawn trajectories, `cases_per_call` per call, the calls side by side, each whole and uncut, and gives every one a verdict: whether it shows the need, its facet or a new facet, the steps and why |
-| 7. record | the verdicts join the state; the round's new findings decide whether it counts as quiet (section 18.5) |
+| 6. verify | `hunt-verify` reads the drawn trajectories, `cases_per_call` per call, and the blind reads in groups of their own, the calls side by side, each trajectory whole and uncut, and gives every one a verdict: whether it shows the need, its facet or a new facet, the steps and why |
+| 7. record | the verdicts join the state, the blind ones apart; the round's new findings decide whether it counts as quiet (section 18.5) |
 
-`hunt-propose` works in the workspace with write access and a shell, alone; `hunt-verify` only reads it.
+`hunt-propose` works in the workspace with write access and a shell, alone; `hunt-verify` only reads it, with no shell.
 A trajectory that got no verdict, because a call failed, refused or left it out, or because its verdict names a facet `facets.json` lacks, stays unread and is listed in the round's record.
+`timeline.jsonl` of the run records when the proposal and the reads of every round were opened and done, so `traj hunt report` gives the minutes of each.
 
 ### 18.4 Draws
 
@@ -1183,6 +1208,10 @@ Hit reads the hits cannot fill go to exploration.
 The other reads explore the trajectories no probe hits.
 Half of them are coverage reads: when a run starts, the trajectories are cut into `clusters` clusters under the extracted features, and every coverage read takes a random unread member of the cluster with the smallest share of read trajectories.
 The other half are random reads, drawn uniformly from the unread trajectories no probe hits; they alone carry the estimate of what the probes miss.
+
+A reader of a trajectory a probe hit sees where it hit, which may sway the verdict toward the probe.
+So `blind_reads` of the hit reads of a round, drawn at random, are read once more by other readers, in groups of their own, as trajectories no probe hits are: the request names the file and gives no hits.
+A blind verdict counts toward no probe and no finding, and a facet it reports as new joins no facet list; `blind.json` of the round holds the blind verdicts, and the report sets each against the verdict with the hits (section 18.6).
 
 ### 18.5 Ledger and the end of the search
 
@@ -1200,20 +1229,34 @@ With the defaults, three quiet rounds hold 36 random reads, and none of them con
 
 ### 18.6 Closing and outputs
 
-After the last round, the closing check reads at most `final_reads` of the trajectories the active probes hit and no round read, those of the most precise probes first, then those more probes hit.
+After the last round, the closing check reads at most `final_reads` of the trajectories the active probes hit and no round read, those of the most precise probes first, then those more probes hit, and with `final_reads: all` every one of them; `blind_reads` of them are read blind as in a round.
 Then the run writes:
 
 | Output | Content |
 |---|---|
-| `.traj/tables/hunt_findings.parquet` | one row per confirmed trajectory: `hunt`, `facet`, `step`, the first step where it shows, `steps`, `why`, `round`, `source` (hit, coverage, random or final) and `probes`; a run replaces the rows of its hunt |
-| `hunts/<name>/` | `facets.yaml`, `probes.yaml` with every active probe's counts, and the probe files; the next run of the hunt starts from them |
-| `.traj/hunts/<name>/<run>/report.json` | whether the search converged, the rounds, the facets with their confirmed trajectories, the ledger of every probe, the coverage with the miss bound, the unread hits of every active probe, the closing check, and the record of every round |
+| `.traj/tables/hunt_verdicts.parquet` | one row per trajectory read: `hunt`, `found`, `facet`, `step`, the first step where it shows, `steps`, `why`, `round`, `source` (hit, coverage, random or final) and `probes`; a run replaces the rows of its hunt |
+| `hunts/<name>/` | `facets.yaml`, `probes.yaml` with every active probe's counts, and the probe files; the next run of the hunt starts from them, and the marks read them |
+| `.traj/hunts/<name>/<run>/report.json` | whether the search converged, the rounds, the facets with their confirmed trajectories, the ledger of every probe, the coverage with the miss bound, the calibration, the batches, the unread hits of every active probe, the closing check, the record of every round, and the marks |
 
-`traj view` shows `hunt_findings` with the other tables.
+The calibration pairs every blind verdict with the verdict the same trajectory got with its hits: how many pairs, how many each found, how many both found in the same facet, the share that agree, and every pair that differs.
+Far more findings with the hits than without them means the hits sway the readers; a blind reader can also miss what a hit points to in a long trajectory, so the differing pairs are listed for a person to settle.
+The batches give, per batch and stratum of `traj.yaml`, the trajectories, how many were read and confirmed, the confirmed ones by facet, and how many the active probes hit that no read covered.
 The state after every round is `.traj/hunts/<name>/<run>/state/<round>.json`, and the clusters are `clusters.json` of the run.
 A run without `report.json` continues from its last state when the hunt runs again, and the calls it made are answered from the mailbox, since every request holds the digests of the files it builds on and the draws follow the seed; a run with `report.json` is finished, and the next one gets a new number.
 
-### 18.7 Workspace
+### 18.7 Marks
+
+The last step of a finished run marks every trajectory with the probes it kept.
+It enables the operator `hunt.marks` in `traj.yaml` as `hunt-<name>` with `params: {hunt: <name>}`, unless an entry of that name exists, and extracts its group.
+The operator has one feature of type `event` per kept facet, named like the facet, with the facet's edge; its events are the positions the probes of the facet hit in the trajectory, and each note names the probe.
+It runs every SQL probe over the tables of one trajectory, registered under their paths with DuckDB's file access off, and the whole text of its steps as `contents`, with the metadata `render.hide_metadata` names left out as in the workspace; it computes every code probe on the trajectory.
+The layers the probes read are enabled with it.
+A trajectory of a dataset the hunt does not search has no value.
+The marks need no model, so every `traj extract` computes them on new trajectories too, and a run that keeps other probes changes them.
+The marks are events like those of section 15: the trajectory list narrows by them, the course of a trajectory shows them at their steps, `traj anomalies` compares their rates between batches, and a person records a verdict on the feature of a facet with `traj review` or on the trajectory page.
+`report.json` names the group, the facet of every feature, and how many trajectories each feature marks.
+
+### 18.8 Workspace
 
 | Path | Content |
 |---|---|
@@ -1223,13 +1266,19 @@ A run without `report.json` continues from its last state when the hunt runs aga
 | `query.py`, `README.md` | the query script of mining, and a description of every file and table with queries that help write probes |
 | `scenario.md` | `.traj/mining/scenario.md`, when a mining round wrote it |
 | `facets.json`, `probes.json`, `probes/`, `ledger.json`, `findings.json` | the state as the next proposal reads it |
-| `rounds/<round>/hits.parquet`, `rounds/<round>/verdicts.json`, `rounds/<round>/cases/` | every position the probes hit, every trajectory read with its verdict, and the files read, whole |
+| `rounds/<round>/proposal.json` | the proposal of the round |
+| `rounds/<round>/hits.parquet`, `rounds/<round>/verdicts.json`, `rounds/<round>/blind.json`, `rounds/<round>/cases/` | every position the probes hit, every trajectory read with its verdict, the blind verdicts, and the files read, whole |
 | `operators/` | `schema.py`, `base.py`, `tables.py`, `rules.py`, the event rules of the library as `example_rules.py`, the operator that returns them as `example_operator.py`, and the operator files of code probes |
 | `notes/` | the notes of every proposal, `notes/hunt-propose-<round>.md` |
 
 A proposal that runs again because the one before was stopped before it submitted starts without its notes and without the operator files the driver did not place.
 
-### 18.8 Agent sessions
+`traj hunt try <name> <file>` runs a probe written to a file, a `.sql` file or a `.py` operator file named like the probe, over every trajectory of the last run of the hunt, as a round runs it, and changes nothing.
+It prints how many positions and trajectories the probe hits; of those trajectories, how many earlier rounds read and confirmed, by facet, with the precision on them; the ones a verdict rejected, with its reason; the confirmed trajectories no probe hit when they were read, which the probe now catches; the trajectories no active probe of the last round hits; for an active probe of the same name, what the file gains and loses against it, and the confirmed trajectories it loses; and a sample of positions with the verdict of each trajectory.
+A probe that does not run prints the error.
+The workspace README gives the command, and the proposal tries every probe with it, so a proposal needs no scripts of its own to compare a probe with the verdicts.
+
+### 18.9 Agent sessions
 
 `traj hunt run <name>` plays the two roles of a round with the aifn functions `hunt-propose` and `hunt-verify`.
 An agent session, such as Claude Code or Codex following the skill `traj-hunt`, plays them itself, and a run moves one step at a time:
@@ -1249,21 +1298,32 @@ The files a session reads and writes, relative to the workspace:
 | `rounds/<round>/propose.md` | the instruction of `hunt-propose`, naming `rounds/<round>/input.json` as its request, with where to write the answer |
 | `rounds/<round>/input.json` | the request a call of `hunt-propose` would get: the digests of the files the proposal builds on |
 | `rounds/<round>/proposal.json`, `proposal.schema.json` | the proposal the session writes, and the JSON Schema of the output model it is checked against |
-| `rounds/<round>/batches/<k>.md`, `batches/<k>.json` | per group of `cases_per_call` cases, the instruction of `hunt-verify` naming the group's file, and the file holding its cases |
+| `rounds/<round>/batches/<k>.md`, `batches/<k>.json` | per group of cases, the instruction of `hunt-verify` naming the group's file, and the file holding its cases; the blind groups come after the others and look alike |
 | `rounds/<round>/answers/<k>.json`, `verify.schema.json` | the verdicts of a group, and the JSON Schema of the output model they are checked against |
 
 The closing check uses `rounds/final/` the same way.
 A session hands in more strictly than a function returns: an answer that does not fit its schema, gives verdicts for other files than its group holds, leaves a case without a verdict, or names a facet `facets.json` lacks is refused with the error, and the round stays pending until a corrected answer is handed in.
-Everything else is the code of section 18.3 to 18.6, so the same answers give the same run either way; the tests hand in the recorded answers of a real run step by step and compare the report, the state of every round, the kept probes and the findings table with those of the replayed run.
+Everything else is the code of section 18.3 to 18.7, so the same answers give the same run either way; the tests hand in the recorded answers of a real run step by step and compare the report, the state of every round, the kept probes and the verdicts table with those of the replayed run.
 A session's calls are not cached in the mailbox: a run continues from `traj hunt status`, and a step taken again is answered again.
 The skill has every group read by a subagent started for it alone, with the instruction and nothing of the session's reasoning, so that a reader cannot confirm what the proposer expected.
 
-### 18.9 Limits
+### 18.10 Reports and pages
+
+`traj hunt report <name> [--run n]` prints what a finished run found, from its report and its timeline: the rounds with their reads, blind reads, findings and the minutes of the proposal and the reads; the closing check; the facets; the batches; the active probes with their counts; the coverage; the calibration with the keys of the differing pairs; how people's verdicts on the features of the marks agree with the hunt's verdicts; the unread hits of every probe; the marks; and where the report, the verdicts table and the kept probes are.
+A person's verdict on the feature of a facet agrees when the person found the trajectory worth a look and the hunt confirmed that facet in it, or when neither did.
+
+The page Hunts of `traj view` lists every hunt with its last finished run.
+A hunt's page shows the need, the coverage and the miss bound, the facets with their confirmed and marked trajectories, the batches, the probes kept, the blind reads and people's verdicts, and every trajectory the hunt read or its marks point to: confirmed, marked and unread, or rejected, each with its facet, its batch, the steps the verdict cites, the reason, and the marks, narrowed by verdict and facet.
+A trajectory opens at the first step its verdict cites, or its first mark.
+The page of a trajectory shows the verdict of every hunt that read it, with its steps, and its marks in its course like any other event.
+
+### 18.11 Limits
 
 - One model gives every verdict, and a trajectory read once is not read again in the run, so a verdict given before a facet existed stays as it was.
 - The miss bound covers the trajectories no probe hits; a real trajectory among the hits of a probe is counted by the probe's precision, which rests on the hits read.
-- Probes run in the project's environment without isolation; a SQL probe is one `SELECT`, and it can read any file DuckDB can.
+- Probes run in the project's environment without isolation; during the rounds a SQL probe is one `SELECT` that names only the readable tables, and a code probe can run any code.
 - The clusters and the diversity of the hit reads rest on the extracted features, so `traj extract` runs before a hunt.
+- The blind reads measure how much the hits sway the readers; they say nothing of what both readers miss.
 
 ## Appendix
 

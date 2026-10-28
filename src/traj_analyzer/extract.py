@@ -10,14 +10,11 @@ from collections import Counter
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
-from uuid import uuid4
 
 import numpy as np
-from aifn import AiFunction, Call, Handle, Mailbox, Refused, Returned, Workspace
-from pydantic import BaseModel
+from aifn import Handle, Mailbox, Refused, Returned, Workspace
 
 from traj_analyzer.batches import assign
 from traj_analyzer.features.spec import ExtractRequest, value_validator
@@ -45,8 +42,9 @@ from traj_analyzer.layers import (
 )
 from traj_analyzer.operators.base import Aggregate, Evidenced, FeatureSpec
 from traj_analyzer.operators.catalog import Group, Instance, load_groups, runtime_groups
+from traj_analyzer.preflight import preflight
 from traj_analyzer.project import ConfigError, Project
-from traj_analyzer.runtime import engine_env, mailbox, model_name, submitting_function
+from traj_analyzer.runtime import engine_env, issue_call, known_calls, mailbox, model_name, submitting_function
 from traj_analyzer.schema import Trajectory
 from traj_analyzer.vectorize import build_frame
 
@@ -95,13 +93,23 @@ class SubprocessWorkers:
     """Run aifn worker processes that exit once the queue is empty.
 
     With `functions`, the workers take only the calls of those functions, so a run processes its own calls and
-    leaves the calls other runs left pending alone.
+    leaves the calls other runs left pending alone. Before the first workers start, one call checks that a worker
+    can run a call at all.
     """
+
+    def __init__(self) -> None:
+        self.checked = False
 
     def check(self, project: Project) -> None:
         engine_env(project)
 
     def run(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None:
+        if not self.checked:
+            preflight(project, self.spawn)
+            self.checked = True
+        self.spawn(project, count, functions)
+
+    def spawn(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None:
         env = {**os.environ, "TRAJ_PROJECT": str(project.root)}
         if functions:
             env[FUNCTIONS_VARIABLE] = ",".join(sorted(functions))
@@ -445,40 +453,6 @@ def _write_tail(project: Project, group: Group, trajectory: Trajectory) -> list[
 
 def _not_applicable(instance: Instance, key: str) -> list[FeatureRow]:
     return [FeatureRow(key=key, feature=f.name, detail="not applicable") for f in instance.features]
-
-
-def _identity(call: Call) -> str:
-    """What aifn compares to reuse a call: everything except the id and the time it was issued."""
-    return json.dumps(call.model_dump(mode="json", exclude={"id", "issued_at"}), sort_keys=True)
-
-
-def known_calls(box: Mailbox) -> dict[str, str]:
-    """Identity of every call in the mailbox, read once; aifn's own lookup rescans the mailbox per submission."""
-    requests = box.root / "requests"
-    if not requests.is_dir():
-        return {}
-    known = {}
-    for path in requests.glob("*.json"):
-        call = Call.model_validate_json(path.read_bytes())
-        known[_identity(call)] = call.id
-    return known
-
-
-def issue_call(
-    box: Mailbox, known: dict[str, str], function: AiFunction[Any, Any], instruction: str, request: BaseModel,
-    workspace: Workspace, dry_run: bool = False,
-) -> Handle[Any]:
-    """Look up or enqueue one call; a dry run only looks the call up and writes nothing."""
-    call = Call(id=uuid4().hex, function=function.name,
-                request=request.model_dump(mode="json", by_alias=True, exclude_defaults=True),
-                issued_at=datetime.now(UTC), workspace=workspace, instruction=instruction)
-    identity = _identity(call)
-    if identity in known:
-        call = call.model_copy(update={"id": known[identity]})
-    elif not dry_run:
-        box.issue(call)
-        known[identity] = call.id
-    return Handle(id=call.id, returns=function.returns, mailbox=box)
 
 
 def _issue(

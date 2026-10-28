@@ -27,6 +27,8 @@ from traj_analyzer.project import (
 from traj_analyzer.schema import Trajectory
 
 LIBRARY = Path(__file__).parent / "library"
+ROOT = "root"
+"""The key of the project root in the context the params of an operator are validated with."""
 _SEGMENT = re.compile(r"[a-z][a-z0-9_]*")
 _GROUP = re.compile(r"[a-z][a-z0-9_-]{0,40}")
 
@@ -122,7 +124,7 @@ class Group:
 
     @property
     def tables(self) -> tuple[str, ...]:
-        return tuple(sorted({t for i in self.instances for t in i.ref.operator.tables}))
+        return tuple(sorted({t for i in self.instances for t in i.ref.operator.tables_with(i.params)}))
 
     @property
     def function_name(self) -> str:
@@ -154,11 +156,13 @@ def discover(project: Project | None) -> dict[str, OperatorRef]:
     return refs
 
 
-def instantiate(ref: OperatorRef, use: OperatorUse) -> Instance:
-    params = ref.operator.params.model_validate(use.params)
+def instantiate(ref: OperatorRef, use: OperatorUse, root: Path) -> Instance:
+    """The operator with the params of `use`, validated with the project `root` in their context, for params that
+    read files of the project."""
+    params = ref.operator.params.model_validate(use.params, context={ROOT: root})
     outputs = ref.operator.outputs(params)
     if not outputs:
-        raise ConfigError(f"{ref.name} produces no outputs")
+        raise ConfigError(f"{ref.name} produces no outputs with the params {use.params}")
 
     def renamed(spec: FeatureSpec) -> FeatureSpec:
         name = f"{use.prefix}_{spec.name}" if use.prefix else spec.name
@@ -190,7 +194,7 @@ def load_groups(project: Project, only: list[str] | None = None) -> list[Group]:
         if use.use not in refs:
             raise ConfigError(f"Unknown operator {use.use}; see `traj operators list`")
         ref = refs[use.use]
-        instance = instantiate(ref, use)
+        instance = instantiate(ref, use, project.root)
         if ref.operator.kind == "code":
             if use.call is not None:
                 raise ConfigError(f"{use.use} is a code operator and takes no call")
@@ -228,8 +232,8 @@ def trial_group(project: Project) -> Group | None:
     if not project.trial_path.is_file():
         return None
     use = OperatorUse(use="llm.features", alias=TRIAL, params=json.loads(project.trial_path.read_text("utf-8")))
-    return Group(name=TRIAL, kind="judgment", instances=[instantiate(discover(project)["llm.features"], use)],
-                 evidence=True)
+    return Group(name=TRIAL, kind="judgment",
+                 instances=[instantiate(discover(project)["llm.features"], use, project.root)], evidence=True)
 
 
 def runtime_groups(project: Project) -> list[Group]:

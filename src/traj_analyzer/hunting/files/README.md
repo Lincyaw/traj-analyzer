@@ -11,8 +11,10 @@
 | `probes.json`, `probes/` | every probe with its status, and the text of the active ones | the driver, from the proposals |
 | `ledger.json` | per probe its hits, reads, confirmations, precision and whether to revise it; per facet the confirmed trajectories; per round what was read and found; the coverage | the driver |
 | `findings.json` | every trajectory confirmed to show the need | the driver |
+| `rounds/<round>/proposal.json` | the facets and probes proposed for the round | the driver from what `hunt-propose` returned, or the agent session |
 | `rounds/<round>/hits.parquet` | every position each probe hit in the round | the driver |
 | `rounds/<round>/verdicts.json` | every trajectory read in the round: why it was read, where probes hit it, the verdict and why | the driver |
+| `rounds/<round>/blind.json` | the verdicts of the trajectories a probe hit that other readers read once more without the hits | the driver |
 | `rounds/<round>/cases/<dataset>/<id>.md` | the trajectories read in the round, whole and uncut | the driver |
 | `operators/` | `schema.py`, `base.py`, `tables.py`, `rules.py`, the example files, and the operator files of code probes | the driver and `hunt-propose` |
 | `notes/` | working notes of the proposals | `hunt-propose` |
@@ -31,11 +33,30 @@ Query the tables to see something across every trajectory at once, and read the 
 ```
 
 The query runs in DuckDB with the workspace as its directory, and prints at most 200 rows.
-A SQL probe is such a query, returning the columns `key`, `step` and `note`; count its hits before you return it:
+A SQL probe is such a query, returning the columns `key`, `step` and `note`.
+It reads only these tables: {readable}; and it names each as `'tables/<name>.parquet'`, never through a table function such as `read_parquet`.
+The probes a hunt keeps mark every trajectory of the project, one trajectory at a time, so what a probe finds in a trajectory depends only on the rows of that trajectory.
+
+## Trying a probe
+
+Write a SQL probe to a `.sql` file under `notes/`, or a code probe to a `.py` file under `operators/` named like the probe, and try it:
 
 ```
-{python} query.py "SELECT count(*) AS positions, count(DISTINCT key) AS trajectories FROM (<probe>)"
+{traj} hunt try {hunt} notes/<name>.sql
+{traj} hunt try {hunt} operators/<name>.py
 ```
+
+The command runs the probe over every trajectory of the hunt, as a round runs it, and prints:
+
+- `positions` and `trajectories`: how many it hits;
+- `read`: of the trajectories it hits, how many earlier rounds read, how many of them were confirmed and in which facets, and its precision on them;
+- `rejected`: the trajectories it hits that a verdict found not to show the need, with the verdict's reason, which a revision leaves out;
+- `misses`: the confirmed trajectories no probe hit when they were read, which it now catches;
+- `new`: the trajectories it hits that no active probe of the last round hits, with the steps it hits in them;
+- `same_name`: when an active probe has the name of the file, what the probe gains and loses against it, and the confirmed trajectories it loses;
+- `sample`: positions it hits, one per trajectory, with the verdict of the trajectory: `found` with its facet, `rejected` or `unread`.
+
+A probe that does not run prints the error.
 
 Queries that help write probes:
 

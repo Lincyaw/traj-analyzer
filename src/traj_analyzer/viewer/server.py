@@ -219,5 +219,13 @@ def create_app(project: Project) -> FastAPI:
     def features() -> list[dict[str, Any]]:
         return review.feature_cards()
 
+    @app.get("/api/review/hunts")
+    def hunts() -> list[dict[str, Any]]:
+        return review.hunts()
+
+    @app.get("/api/review/hunt")
+    def hunt(name: str) -> dict[str, Any]:
+        return review.hunt(name)
+
     app.mount("/", StaticFiles(directory=STATIC, html=True))
     return app

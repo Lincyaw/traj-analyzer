@@ -35,7 +35,7 @@ class TrajectoryView {
     this.container.append(this.header(trajectory, anomaly));
     this.course = el("div", { class: "course" }, this.turns.map((turn) => this.turnNode(turn)));
     this.inspector = el("div", { class: "inspector" });
-    this.aside = el("aside", { class: "aside" }, this.whyPanel(), this.verdictPanel());
+    this.aside = el("aside", { class: "aside" }, this.whyPanel(), this.huntPanel(), this.verdictPanel());
     this.container.append(el("div", { class: "detail" }, this.course, this.inspector, this.aside));
     const first = step ?? this.events[0]?.step ?? this.turns[0]?.start ?? 0;
     this.select(first);
@@ -215,6 +215,21 @@ class TrajectoryView {
     }
     line.addEventListener("click", () => { this.featureField.value = feature.name; });
     return line;
+  }
+
+  // What the hunts read in it
+
+  huntPanel() {
+    if (!this.data.hunts.length) {
+      return null;
+    }
+    return el("section", { class: "panel" }, el("h2", { text: "Hunts" }), this.data.hunts.map((verdict) => el("div", { class: "feature-line" },
+      el("span", { class: "feature-name" }, el("a", { class: "link", href: `#/hunts?name=${encodeURIComponent(verdict.hunt)}`, text: verdict.hunt })),
+      chip(verdict.found ? `confirmed: ${fmt.words(verdict.facet)}` : "rejected", { kind: verdict.found ? "alert" : "muted", title: `Read in round ${verdict.round}, drawn as ${verdict.source}.` }),
+      el("span", { class: "evidence" }, (verdict.steps ?? []).map((step) =>
+        el("button", { class: "step-ref link", text: `#${step}`, title: "A step the verdict cites", on: { click: () => this.select(step) } }))),
+      el("p", { class: "muted", text: verdict.why }),
+    )));
   }
 
   // Verdicts

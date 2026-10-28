@@ -7,7 +7,7 @@ from typing import Any
 
 from traj_analyzer.anomalies import context_frame
 from traj_analyzer.evaluation import evaluate, reference_keys
-from traj_analyzer.extract import SubprocessWorkers, WorkerRunner, known_calls
+from traj_analyzer.extract import SubprocessWorkers, WorkerRunner
 from traj_analyzer.ingest import load_index
 from traj_analyzer.mining.checks import apply, candidate_items, flagged_items, revise, tail_check, trial
 from traj_analyzer.mining.functions import (
@@ -35,7 +35,7 @@ from traj_analyzer.mining.session import WORKSPACE, Session
 from traj_analyzer.mining.workspace import prepare_workspace
 from traj_analyzer.operators.catalog import load_groups
 from traj_analyzer.project import ConfigError, Project
-from traj_analyzer.runtime import mailbox
+from traj_analyzer.runtime import known_calls, mailbox
 
 REPORT = "report.json"
 
@@ -72,8 +72,8 @@ def run_round(project: Project, *, workers: int | None, runner: WorkerRunner) ->
     reference = reference_keys(project, rows)
     held_out = evaluation.held_out()
     session = Session(
-        project=project, runner=runner, workers=workers, box=mailbox(project), known=known_calls(mailbox(project)),
-        functions=functions(project), workspace=directory / WORKSPACE,
+        project=project, runner=runner, workers=workers or project.config.extract.workers, box=mailbox(project),
+        known=known_calls(mailbox(project)), functions=functions(project), workspace=directory / WORKSPACE,
         number=number, directory=directory, rows={row.key: row for row in rows}, reference=reference,
         chosen=evaluation.evaluation_set, readable=[key for key in reference if key not in held_out],
         context=context_frame(project, groups, rows, evaluation.context()))

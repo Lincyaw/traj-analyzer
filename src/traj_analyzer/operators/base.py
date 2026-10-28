@@ -171,7 +171,8 @@ class Operator:
     """One reusable feature extractor; every operator file defines one as `OPERATOR`.
 
     A code operator computes its outputs with `compute(trajectory, tables, params)`, which returns a value for every
-    output name; `tables` names the tables of the parsing layers it reads, which are enabled with it.
+    output name; `tables` names the tables of the parsing layers it reads, which are enabled with it, and
+    `tables_of(params)` the tables it reads besides those with these params.
     A judgment operator contributes its outputs and `guidance` to the instruction of its call group; `unit` says
     what one call covers, and for `turn` and `window` units `aggregates` turn the per-unit outputs into features.
     `requires` marks the trajectories the operator applies to; the others get empty values.
@@ -186,6 +187,7 @@ class Operator:
     guidance: Callable[[Any], str] | None = None
     requires: Callable[[Trajectory], bool] | None = None
     tables: tuple[str, ...] = ()
+    tables_of: Callable[[Any], tuple[str, ...]] | None = None
     unit: Unit = "trajectory"
     aggregates: Callable[[Any], list[Aggregate]] | None = None
 
@@ -199,8 +201,13 @@ class Operator:
         if self.kind == "judgment" and (self.unit != "trajectory") != (self.aggregates is not None):
             raise ValueError("a judgment operator over turns or windows declares aggregates, one per trajectory "
                              "does not")
-        if self.kind == "judgment" and self.tables:
+        if self.kind == "judgment" and (self.tables or self.tables_of is not None):
             raise ValueError("tables apply only to code operators")
+
+    def tables_with(self, params: Any) -> tuple[str, ...]:
+        """Every table the operator reads with these params."""
+        extra = self.tables_of(params) if self.tables_of is not None else ()
+        return tuple(sorted({*self.tables, *extra}))
 
 
 def has_user_messages(trajectory: Trajectory) -> bool:

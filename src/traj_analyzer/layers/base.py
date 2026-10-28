@@ -181,5 +181,5 @@ def _row_name(table: str) -> str:
     names = {"steps": "step", "trajectories": "trajectory", "actions": "tool action", "relations": "relation between "
              "two actions", "queries": "SQL query", "turns": "message the user typed, with what followed it",
              "evidence": "step a feature value rests on", "events": "event", "judgments": "judged unit",
-             "contents": "step, with its whole text", "hunt_findings": "trajectory a hunt confirmed"}
+             "contents": "step, with its whole text", "hunt_verdicts": "trajectory a hunt read"}
     return names.get(table, table.rstrip("s"))

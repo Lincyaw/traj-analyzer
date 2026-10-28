@@ -33,7 +33,7 @@ def compute_operator(
     (feature,) = operator.outputs(operator.params())
     check = value_validator(feature)
     params = operator.params()
-    layers = enabled_layers(project, set(operator.tables))
+    layers = enabled_layers(project, set(operator.tables_with(params)))
     harnesses = discover_harnesses(project)
     values: dict[str, Any] = {}
     steps: dict[str, tuple[int, ...]] = {}

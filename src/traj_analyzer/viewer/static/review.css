@@ -836,6 +836,27 @@ table.grid tr.shifts td {
   color: var(--muted);
 }
 
+.hunt-section {
+  margin: 18px 0;
+}
+
+.hunt-section h2 {
+  margin-bottom: 2px;
+}
+
+.page-hunts .filters .panel {
+  flex: 1 1 360px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.page-hunts .filters .panel + .panel {
+  margin-top: 0;
+  padding-top: 10px;
+}
+
 @media (max-width: 1100px) {
   .detail {
     grid-template-columns: 1fr;

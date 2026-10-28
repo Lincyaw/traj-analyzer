@@ -12,6 +12,7 @@ from traj_analyzer.extract import FUNCTIONS_VARIABLE
 from traj_analyzer.hunting.functions import functions as hunting_functions
 from traj_analyzer.mining import functions as mining_functions
 from traj_analyzer.operators.catalog import runtime_groups
+from traj_analyzer.preflight import check_function
 from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.runtime import build_function, engine_env, policy
 
@@ -33,9 +34,12 @@ class WorkerMailbox(Mailbox):
 
 
 def registry(project: Project) -> Registry:
-    """Every aifn function a worker of this project may be asked to run: feature extraction, mining and hunts."""
+    """Every aifn function a worker of this project may be asked to run: feature extraction, mining, hunts and the
+    check that a worker can run a call."""
     functions = dict(mining_functions.functions(project))
     functions.update(hunting_functions(project))
+    check = check_function(project)
+    functions[check.name] = check
     for group in runtime_groups(project):
         if group.is_code:
             continue

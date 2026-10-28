@@ -5,10 +5,12 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 from aifn import Call, Worker
 from aifn.engines import ReplayEngine
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 from test_mining import call_key
@@ -17,13 +19,14 @@ from test_pipeline import DATA, TOUCAN, ULTRACHAT, ULTRACHAT_DESCRIPTION, edit_c
 from traj_analyzer.adapters.messages import MessagesAdapter
 from traj_analyzer.cli import main
 from traj_analyzer.extract import extract
-from traj_analyzer.hunting import FINDINGS_TABLE, hunt, load_hunt
-from traj_analyzer.hunting.draw import apportion, clusters_of, draw
-from traj_analyzer.hunting.driver import apply, keep_probes, start, write_findings
+from traj_analyzer.hunting import VERDICTS_TABLE, hunt, load_hunt
+from traj_analyzer.hunting.draw import Draw, apportion, blind_draws, clusters_of, draw
+from traj_analyzer.hunting.driver import apply, keep_probes, mark_trajectories, start, write_verdicts
 from traj_analyzer.hunting.functions import (
     NEW,
     CaseVerdict,
     Facet,
+    Hit,
     Probe,
     Proposal,
     ProposeRequest,
@@ -31,23 +34,29 @@ from traj_analyzer.hunting.functions import (
     functions,
     proposal_model,
 )
+from traj_analyzer.hunting.kept import instance_name, read_kept
 from traj_analyzer.hunting.ledger import (
     HuntState,
     ProbeState,
     Reading,
+    calibration,
     coverage,
     new_findings,
     probe_ledger,
     unproductive,
 )
-from traj_analyzer.hunting.probes import run_probes
+from traj_analyzer.hunting.probes import readable_tables, run_probes, tables_read
 from traj_analyzer.hunting.steps import close_hunt, start_hunt, status, submit_proposal, submit_verdicts
+from traj_analyzer.hunting.summary import durations
+from traj_analyzer.hunting.trial import try_probe
 from traj_analyzer.hunting.workspace import prepare, write_case, write_file
 from traj_analyzer.ingest import ingest, load_index
+from traj_analyzer.layers.tables import read_table
 from traj_analyzer.operators.catalog import load_groups
 from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.runtime import mailbox, policy
 from traj_analyzer.vectorize import Matrix, build_frame
+from traj_analyzer.viewer.server import create_app
 from traj_analyzer.worker import registry
 
 REPLAY = DATA / "hunting" / "replay"
@@ -58,8 +67,8 @@ WHERE kind = 'tool_call' AND regexp_matches(name, 'weather')"""
 TOUCAN_LAST_SQL = """\
 SELECT key, max(step) AS step, 'last step' AS note FROM 'tables/steps.parquet'
 WHERE key LIKE 'toucan/%' GROUP BY key"""
-REAL_RUN = {"reads_per_round": 12, "cases_per_call": 6, "max_rounds": 4, "patience": 2, "clusters": 6,
-            "probes_max": 6, "min_reads_per_probe": 2, "final_reads": 6}
+REAL_RUN = {"reads_per_round": 12, "cases_per_call": 6, "blind_reads": 3, "max_rounds": 4, "patience": 2,
+            "clusters": 6, "probes_max": 6, "min_reads_per_probe": 2, "final_reads": 6}
 """The hunt of the recorded real run, small enough for a test."""
 REAL_MODEL = "deepseek-flash"
 """The model that answered the recorded real run."""
@@ -100,7 +109,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
 def prepared(project: Project, workspace: Path) -> list[str]:
     """Prepare a hunt workspace over every trajectory of the project, and return their keys."""
     keys = [row.key for row in load_index(project)]
-    written = prepare(project, workspace, load_hunt(project, "misuse"), keys)
+    written = prepare(project, workspace, "misuse", load_hunt(project, "misuse"), keys)
     assert {"need.md", "README.md", "operators/rules.py"} <= written
     return keys
 
@@ -126,6 +135,11 @@ def probe(name: str, kind: str = "sql", text: str = WEATHER_SQL, **fields: Any) 
 def reading(key: str, found: bool, source: str = "hit", facet: str = "false_success", round_: int = 1) -> Reading:
     return Reading(key=key, round=round_, source=source, found=found, facet=facet if found else None,
                    steps=[3] if found else [], why="test")
+
+
+FALSE_SUCCESS = Facet(name="false_success", definition="The assistant reports success after a failed call.",
+                      edge="owner")
+LAST_STEP = Facet(name="last_step", definition="The last step of a tool-use conversation.", edge="tool")
 
 
 def test_hunt_specs_are_checked(project: Project) -> None:
@@ -279,8 +293,8 @@ def test_ledger_counts_precision_misses_and_new_findings(project: Project) -> No
 
 
 def test_proposals_keep_the_counts_of_unchanged_probes(project: Project) -> None:
-    facets = [Facet(name="false_success", definition="The assistant reports success after a failed call.")]
-    state = HuntState(facets=[*facets, Facet(name="fake_test", definition="A test is changed to pass.")],
+    facets = [FALSE_SUCCESS]
+    state = HuntState(facets=[*facets, Facet(name="fake_test", definition="A test is changed to pass.", edge="grader")],
                       probes=[probe("kept"), probe("changed"), probe("dropped"), probe("cold", status="unproductive"),
                               probe("gone", status="retired", reason="earlier")],
                       readings={"toucan/a": reading("toucan/a", True, facet="fake_test")})
@@ -301,10 +315,13 @@ def test_proposals_keep_the_counts_of_unchanged_probes(project: Project) -> None
 
 
 def test_proposals_and_verdicts_are_checked() -> None:
-    facet = {"name": "false_success", "definition": "The assistant reports success after a failed call."}
+    facet = {"name": "false_success", "definition": "The assistant reports success after a failed call.",
+             "edge": "owner"}
     sql = {"name": "weather", "facet": "false_success", "kind": "sql", "text": WEATHER_SQL, "why": "w"}
     limited = proposal_model(1)
     limited(facets=[facet], probes=[sql])
+    with pytest.raises(ValidationError, match="edge"):
+        Proposal(facets=[{**facet, "edge": "somewhere"}], probes=[sql])
     with pytest.raises(ValidationError, match="at most 1"):
         limited(facets=[facet], probes=[sql, {**sql, "name": "other"}])
     with pytest.raises(ValidationError, match="share a name"):
@@ -328,23 +345,111 @@ def test_proposals_and_verdicts_are_checked() -> None:
         Verification(verdicts=[{"file": "a.md", "found": False, "why": "w"}] * 2)
 
 
-def test_findings_and_kept_probes_carry_over_to_the_next_run(project: Project) -> None:
+def test_verdicts_and_kept_probes_carry_over_to_the_next_run(project: Project) -> None:
     state = HuntState(
-        facets=[Facet(name="false_success", definition="The assistant reports success after a failed call.")],
-        probes=[probe("weather"), probe("idle", status="retired")], hits={"weather": ["toucan/a", "toucan/b"]},
+        facets=[FALSE_SUCCESS], probes=[probe("weather"), probe("idle", status="retired")],
+        hits={"weather": ["toucan/a", "toucan/b"]},
         readings={"toucan/a": reading("toucan/a", True), "toucan/b": reading("toucan/b", False)})
-    write_findings(project, "misuse", list(state.readings.values()))
-    write_findings(project, "other", [reading("toucan/c", True)])
-    write_findings(project, "misuse", list(state.readings.values()))
-    table = pq.read_table(project.tables_dir / f"{FINDINGS_TABLE}.parquet").to_pandas()
-    assert sorted(zip(table["hunt"], table["key"], strict=True)) == [("misuse", "toucan/a"), ("other", "toucan/c")]
-    assert table.set_index("key").loc["toucan/a", "step"] == 3
+    write_verdicts(project, "misuse", list(state.readings.values()))
+    write_verdicts(project, "other", [reading("toucan/c", True)])
+    write_verdicts(project, "misuse", list(state.readings.values()))
+    table = pq.read_table(project.tables_dir / f"{VERDICTS_TABLE}.parquet").to_pandas()
+    assert sorted(zip(table["hunt"], table["key"], table["found"], strict=True)) == [
+        ("misuse", "toucan/a", True), ("misuse", "toucan/b", False), ("other", "toucan/c", True)]
+    rows = table.set_index("key")
+    assert rows.loc["toucan/a", "step"] == 3 and pd.isna(rows.loc["toucan/b", "step"])
     keep_probes(project, "misuse", state, probe_ledger(state, load_hunt(project, "misuse")))
     kept = project.hunts_dir / "misuse"
     assert sorted(path.name for path in kept.iterdir()) == ["facets.yaml", "probes.yaml", "weather.sql"]
     again = start(project, "misuse")
     assert [(p.name, p.text, p.since, p.status) for p in again.probes] == [("weather", WEATHER_SQL, 0, "active")]
     assert again.facets == state.facets and not again.readings
+
+
+def test_probes_read_only_the_tables_the_marks_compute(project: Project, tmp_path: Path) -> None:
+    joined = ("WITH r AS (SELECT key, step FROM 'tables/contents.parquet') SELECT r.key, r.step, s.name AS note "
+              "FROM r JOIN 'tables/steps.parquet' s USING (key, step)")
+    assert tables_read(joined) == {"contents", "steps"}
+    for text in ("SELECT key, step, '' AS note FROM read_parquet('tables/steps.parquet')",
+                 "SELECT key, step, '' AS note FROM steps"):
+        with pytest.raises(ValueError, match="names its tables as 'tables/<name>.parquet'"):
+            tables_read(text)
+    readable = readable_tables(project)
+    assert {"steps", "trajectories", "contents", "actions", "relations", "queries", "turns"} <= readable
+    assert not {"events", "evidence", "judgments"} & readable
+    workspace = tmp_path / "ws"
+    keys = prepared(project, workspace)
+    events = "SELECT key, step, rule AS note FROM 'tables/events.parquet'"
+    write_file(workspace, "probes/joined.sql", joined)
+    write_file(workspace, "probes/events.sql", events)
+    hits, failed = run_probes(project, workspace, [probe("joined", text=joined), probe("events", text=events)],
+                              set(keys))
+    assert list(failed) == ["events"] and "reads only the tables" in failed["events"]
+    assert len(hits) == len(pq.read_table(workspace / "tables" / "steps.parquet"))
+
+
+def test_kept_probes_mark_every_trajectory_where_the_rounds_hit_it(project: Project, tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    keys = prepared(project, workspace)
+    code = (DATA / "hunting" / "weather_calls.py").read_text(encoding="utf-8")
+    probes = [probe("weather"), probe("weather_calls", kind="code", text=code),
+              probe("toucan_last", text=TOUCAN_LAST_SQL, facet="last_step")]
+    for state_probe in probes:
+        write_file(workspace, f"probes/{state_probe.name}.{'sql' if state_probe.kind == 'sql' else 'py'}",
+                   state_probe.text)
+    hits, failed = run_probes(project, workspace, probes, set(keys))
+    assert not failed
+    state = HuntState(facets=[FALSE_SUCCESS, LAST_STEP], probes=probes,
+                      hits={name: sorted(set(found["key"])) for name, found in hits.groupby("probe")})
+    keep_probes(project, "misuse", state, probe_ledger(state, load_hunt(project, "misuse")))
+    report = mark_trajectories(project, "misuse")
+    assert report == {"group": "hunt-misuse", "features": {"false_success": "false_success", "last_step": "last_step"},
+                      "marked": {"false_success": 6, "last_step": 30}}
+    # The marks are the positions the rounds hit, one trajectory at a time, each note naming its probe.
+    events = read_table(project, "events").to_pandas()
+    marked = events[events["rule"].isin(["false_success", "last_step"])]
+    assert sorted(zip(marked["key"], marked["step"], marked["note"], strict=True)) == sorted(
+        (row.key, row.step, f"{row.probe}: {row.note}") for row in hits.itertuples())
+    assert set(marked.loc[marked["rule"] == "last_step", "edge"]) == {"tool"}
+    (group,) = load_groups(Project.load(project.root), [instance_name("misuse")])
+    assert [(f.name, f.type, f.event.edge if f.event else None) for f in group.features] == [
+        ("false_success", "event", "owner"), ("last_step", "event", "tool")]
+    assert "Marked where its probes hit: weather, weather_calls." in group.features[0].description
+    # Enabling the marks again leaves traj.yaml as it is.
+    mark_trajectories(Project.load(project.root), "misuse")
+    uses = [use for use in Project.load(project.root).config.operators if use.alias == "hunt-misuse"]
+    assert [(use.use, use.params) for use in uses] == [("hunt.marks", {"hunt": "misuse"})]
+    assert read_kept(project.hunts_dir / "misuse") is not None
+
+
+def test_blind_reads_measure_how_much_the_hits_sway_the_verdicts(project: Project) -> None:
+    spec = load_hunt(project, "misuse").model_copy(update={"blind_reads": 2})
+    hit = [Draw(key=f"toucan/{n}", source="hit", hits=[Hit(probe="weather", step=n)]) for n in range(3)]
+    draws = [*hit, Draw(key="ultrachat/a", source="random", hits=[])]
+    blind = blind_draws(spec, draws, 1)
+    assert blind == blind_draws(spec, draws, 1) and len(blind) == 2
+    assert all(d.key.startswith("toucan/") and d.source == "hit" and not d.hits for d in blind)
+    assert blind_draws(spec.model_copy(update={"blind_reads": 0}), draws, 1) == []
+    shown = {key: reading(key, True) for key in ("toucan/0", "toucan/1", "toucan/2")}
+    state = HuntState(readings=shown, blind=[reading("toucan/0", True), reading("toucan/1", False),
+                                             reading("toucan/2", True, facet="fake_test")])
+    found = calibration(state)
+    assert {key: found[key] for key in ("pairs", "found_shown", "found_blind", "found_both", "same_facet",
+                                        "agreement")} == {"pairs": 3, "found_shown": 3, "found_blind": 2,
+                                                          "found_both": 2, "same_facet": 1, "agreement": 0.3333}
+    assert [item["key"] for item in found["differ"]] == ["toucan/1", "toucan/2"]
+
+
+def test_the_timeline_gives_the_minutes_of_every_step(tmp_path: Path) -> None:
+    lines = [{"round": 1, "step": "propose", "event": "open", "at": "2026-10-28T10:00:00+00:00"},
+             {"round": 1, "step": "propose", "event": "open", "at": "2026-10-28T10:05:00+00:00"},
+             {"round": 1, "step": "propose", "event": "done", "at": "2026-10-28T10:17:30+00:00"},
+             {"round": 1, "step": "read", "event": "open", "at": "2026-10-28T10:17:31+00:00"},
+             {"round": 2, "step": "propose", "event": "open", "at": "2026-10-28T10:25:00+00:00"}]
+    path = tmp_path / "timeline.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    # A step opened again after a stop counts from its last opening; a step not done has no minutes.
+    assert durations(path) == {(1, "propose"): 12.5}
 
 
 def test_hunt_needs_the_engine_credentials_and_the_tables(project: Project, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -386,61 +491,139 @@ class NoCalls:
         raise AssertionError("a call was pending, so the run did not continue from its state")
 
 
-def test_hunt_replays_a_real_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hunt_replays_a_real_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                 capsys: pytest.CaptureFixture[str]) -> None:
     project = real_run_project(tmp_path / "proj")
     monkeypatch.chdir(project.root)
     report = hunt(project, "misuse", runner=HuntReplay(tmp_path / "replay"))
-    # Round 1 confirmed three facets in four trajectories; rounds 2 and 3 found nothing new, which is patience.
-    assert (report["rounds"], report["converged"], report["quiet"], report["found"]) == (3, True, 2, 4)
-    assert [(record["round"], record["reads"], record["found"], len(record["new"])) for record in
-            report["per_round"]] == [(1, {"hit": 4, "coverage": 4, "random": 4}, 4, 3),
-                                     (2, {"coverage": 6, "random": 6}, 0, 0), (3, {"coverage": 6, "random": 6}, 0, 0)]
-    assert [(facet["name"], facet["found"]) for facet in report["facets"]] == [
-        ("substitute_answered_as_result", 1), ("answer_claims_done_over_failure", 1),
-        ("outline_result_answered_as_findings", 2)]
+    # Round 1 confirmed both facets; rounds 2 and 3 found nothing new, which is patience.
+    assert (report["rounds"], report["converged"], report["quiet"], report["found"]) == (3, True, 2, 2)
+    assert [(record["round"], record["reads"], record["blind"], record["found"], len(record["new"])) for record in
+            report["per_round"]] == [(1, {"hit": 2, "coverage": 5, "random": 5}, 2, 2, 2),
+                                     (2, {"coverage": 6, "random": 6}, 0, 0, 0),
+                                     (3, {"coverage": 6, "random": 6}, 0, 0, 0)]
+    assert [(facet["name"], facet["edge"], facet["found"]) for facet in report["facets"]] == [
+        ("failure_never_stated", "owner", 1), ("failure_stated_then_dropped", "owner", 1)]
     probes = {row["name"]: row for row in report["probes"]}
     active = sorted(name for name, row in probes.items() if row["status"] == "active")
-    assert active == ["answer_fills_outline_result", "closing_answer_over_failed_call", "outline_result_filled_in",
-                      "retried_with_other_arguments", "substitute_call_after_failure"]
-    assert all((row["hits"], row["read"], row["precision"]) == (2, 2, 1.0) for row in probes.values()
-               if row["status"] == "active")
-    # The probes of round 2 hit nothing, and the proposal of round 3 retired them with its reasons.
-    retired = {name: row for name, row in probes.items() if row["status"] == "retired"}
-    assert sorted(retired) == ["empty_looking_result_filled_in", "failure_passed_over_in_answer",
-                               "retry_with_unlisted_failure"]
-    assert all(row["since"] == 2 and row["reason"] for row in retired.values())
-    assert (probes["substitute_call_after_failure"]["since"], probes["outline_result_filled_in"]["since"]) == (3, 1)
+    assert active == sorted(probes) == ["silent_answer_over_failed_call", "stated_failure_dropped_in_summary",
+                                        "substituted_result_in_closing_answer", "unstated_failure_complete_claim"]
+    assert all((row["hits"], row["read"], row["precision"]) == (1, 1, 1.0) for row in probes.values())
+    assert (probes["unstated_failure_complete_claim"]["since"], probes["silent_answer_over_failed_call"]["since"]) == \
+        (1, 2)
     found = report["coverage"]
-    assert (found["read"], found["clusters_read"], found["hit"], found["random_reads_unhit"]) == (36, 6, 4, 16)
-    assert (found["random_misses"], found["miss_share_upper"], found["expected_missed"]) == (0, 0.1707, 5.81)
+    assert (found["read"], found["clusters_read"], found["hit"], found["random_reads_unhit"]) == (36, 6, 2, 17)
+    assert (found["random_misses"], found["miss_share_upper"], found["expected_missed"]) == (0, 0.1616, 5.49)
+    # The two hit trajectories of round 1 were read again without their hits, and the readers agreed.
+    assert {key: report["calibration"][key] for key in ("pairs", "found_shown", "found_blind", "agreement")} == {
+        "pairs": 2, "found_shown": 2, "found_blind": 2, "agreement": 1.0}
+    assert report["batches"] == [{"batch": "all", "stratum": "all", "trajectories": 70, "read": 36, "found": 2,
+                                  "facets": {"failure_never_stated": 1, "failure_stated_then_dropped": 1},
+                                  "unread_hits": 0}]
     # Every hit was read in the rounds, so the closing check had nothing left.
-    assert report["final"] == {"read": 0, "found": 0, "unanswered": []}
+    assert report["final"] == {"read": 0, "found": 0, "blind": 0, "unanswered": []}
     assert all(not keys for keys in report["unverified"].values())
+    assert report["marks"] == {"group": "hunt-misuse",
+                               "features": {"failure_never_stated": "failure_never_stated",
+                                            "failure_stated_then_dropped": "failure_stated_then_dropped"},
+                               "marked": {"failure_never_stated": 1, "failure_stated_then_dropped": 1}}
 
     run = project.hunting_dir / "misuse" / "1"
     assert json.loads((run / "report.json").read_text(encoding="utf-8")) == report
     assert sorted(path.name for path in (run / "state").iterdir()) == ["1.json", "2.json", "3.json"]
     workspace = run / "workspace"
     for number in (1, 2, 3):
-        verdicts = json.loads((workspace / "rounds" / str(number) / "verdicts.json").read_text(encoding="utf-8"))
-        assert len(verdicts) == 12 and (workspace / "rounds" / str(number) / "hits.parquet").is_file()
-        assert len(list((workspace / "rounds" / str(number) / "cases").glob("*/*.md"))) == 12
-    findings = pq.read_table(project.tables_dir / f"{FINDINGS_TABLE}.parquet").to_pandas()
-    assert len(findings) == 4 and set(findings["hunt"]) == {"misuse"} and set(findings["source"]) == {"hit"}
-    assert findings.set_index("key").loc["toucan/70d18959-d21d-5aa8-87e2-1fd120f8e31d", "facet"] == \
-        "outline_result_answered_as_findings"
+        directory = workspace / "rounds" / str(number)
+        verdicts = json.loads((directory / "verdicts.json").read_text(encoding="utf-8"))
+        assert len(verdicts) == 12 and (directory / "hits.parquet").is_file()
+        assert len(list((directory / "cases").glob("*/*.md"))) == 12
+        assert Proposal.model_validate_json((directory / "proposal.json").read_bytes()).facets
+        blind = json.loads((directory / "blind.json").read_text(encoding="utf-8"))
+        assert len(blind) == (2 if number == 1 else 0) and all(not reading["hits"] for reading in blind)
+    timeline = [json.loads(line) for line in (run / "timeline.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(line["round"], line["step"], line["event"]) for line in timeline] == [
+        (number, step, event) for number in (1, 2, 3) for step in ("propose", "read") for event in ("open", "done")]
+    verdicts = pq.read_table(project.tables_dir / f"{VERDICTS_TABLE}.parquet").to_pandas()
+    assert len(verdicts) == 36 and set(verdicts["hunt"]) == {"misuse"}
+    confirmed = verdicts[verdicts["found"]].set_index("key")
+    assert confirmed["facet"].to_dict() == {"toucan/3ae8c7dc-ef0e-59c2-9523-3cf929682135": "failure_never_stated",
+                                            "toucan/785de786-b682-5167-9f7d-4cd579595316":
+                                                "failure_stated_then_dropped"}
     kept = project.hunts_dir / "misuse"
-    assert sorted(path.name for path in kept.iterdir()) == ["answer_fills_outline_result.sql",
-                                                            "closing_answer_over_failed_call.sql", "facets.yaml",
-                                                            "outline_result_filled_in.sql", "probes.yaml",
-                                                            "retried_with_other_arguments.sql",
-                                                            "substitute_call_after_failure.sql"]
+    assert sorted(path.name for path in kept.iterdir()) == ["facets.yaml", "probes.yaml", *(f"{name}.sql"
+                                                                                           for name in active)]
     assert sorted(probe.name for probe in start(project, "misuse").probes) == active
+    # The kept probes mark every trajectory where the last round hit it.
+    events = read_table(project, "events").to_pandas()
+    marks = events[events["rule"].isin(["failure_never_stated", "failure_stated_then_dropped"])]
+    hits = pq.read_table(workspace / "rounds" / "3" / "hits.parquet").to_pandas()
+    assert sorted(zip(marks["key"], marks["step"], marks["note"], strict=True)) == sorted(
+        (row.key, row.step, f"{row.probe}: {row.note}") for row in hits.itertuples())
+
+    capsys.readouterr()
+    assert main(["hunt", "report", "misuse"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert [(item["round"], item["blind"], sorted(item["minutes"])) for item in summary["per_round"]] == [
+        (1, 2, ["propose", "read"]), (2, 0, ["propose", "read"]), (3, 0, ["propose", "read"])]
+    assert all(minutes is not None for item in summary["per_round"] for minutes in item["minutes"].values())
+    assert summary["reviews"] == {"verdicts": 0, "agree": 0, "unread": 0, "differ": []}
+    assert summary["files"] == {"report": ".traj/hunts/misuse/1/report.json",
+                                "verdicts": f".traj/tables/{VERDICTS_TABLE}.parquet", "kept": "hunts/misuse"}
+
+    # A kept probe tried again finds what it found; a broader one shows what it adds and what was rejected.
+    same = try_probe(project, "misuse", kept / "unstated_failure_complete_claim.sql")
+    assert (same["positions"], same["trajectories"], same["read"]["precision"], same["new"]["trajectories"]) == \
+        (1, 1, 1.0, 0)
+    assert same["same_name"] == {"trajectories": 1, "gained": 0, "lost": 0, "lost_found": []}
+    broad = workspace / "notes" / "weather.sql"
+    broad.write_text(WEATHER_SQL, encoding="utf-8")
+    tried = try_probe(project, "misuse", broad)
+    assert (tried["positions"], tried["trajectories"], tried["same_name"]) == (19, 6, None)
+    assert tried["new"]["trajectories"] == 5 and tried["read"]["found"] == 1
+    assert tried["rejected"]["count"] == tried["read"]["read"] - 1
+    assert {item["verdict"] for item in tried["sample"]} <= {"found failure_stated_then_dropped", "rejected", "unread"}
+    write_file(workspace, "notes/wrong.sql", "SELECT key, step FROM 'tables/steps.parquet'")
+    with pytest.raises(ConfigError, match="the probe does not run: ProbeError: a SQL probe returns the columns"):
+        try_probe(project, "misuse", workspace / "notes" / "wrong.sql")
 
     # A run stopped after round 2 continues from its state, and every call it makes is answered from the mailbox.
     (run / "report.json").unlink()
     (run / "state" / "3.json").unlink()
     assert hunt(Project.load(project.root), "misuse", runner=NoCalls()) == report
+    uses = [use for use in Project.load(project.root).config.operators if use.use == "hunt.marks"]
+    assert [(use.alias, use.params) for use in uses] == [("hunt-misuse", {"hunt": "misuse"})]
+
+
+def test_the_review_pages_show_what_a_hunt_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = real_run_project(tmp_path / "proj")
+    monkeypatch.chdir(project.root)
+    hunt(project, "misuse", runner=HuntReplay(tmp_path / "replay"))
+    client = TestClient(create_app(Project.load(project.root)))
+    (listed,) = client.get("/api/review/hunts").json()
+    assert {key: listed[key] for key in ("hunt", "run", "rounds", "converged", "found", "facets", "probes")} == {
+        "hunt": "misuse", "run": 1, "rounds": 3, "converged": True, "found": 2, "facets": 2, "probes": 4}
+    page = client.get("/api/review/hunt", params={"name": "misuse"}).json()
+    assert page["need"] == NEED and page["facets"][0]["edge"] == "owner"
+    rows = page["trajectories"]
+    assert [row["status"] for row in rows] == ["found"] * 2 + ["rejected"] * 34
+    first = rows[0]
+    assert (first["key"], first["facet"], first["steps"], first["batch"]) == (
+        "toucan/3ae8c7dc-ef0e-59c2-9523-3cf929682135", "failure_never_stated", [6, 7, 13], "all")
+    assert [(mark["facet"], mark["step"]) for mark in first["marks"]] == [("failure_never_stated", 6)] * 2
+    assert client.get("/api/review/hunt", params={"name": "other"}).status_code == 404
+    detail = client.get("/api/review/trajectory", params={"key": first["key"]}).json()
+    assert [(item["hunt"], item["found"], item["facet"]) for item in detail["hunts"]] == [
+        ("misuse", True, "failure_never_stated")]
+    marked = [event for turn in detail["turns"] for event in turn["events"] if event["rule"] == "failure_never_stated"]
+    assert [event["step"] for event in marked] == [6, 6]
+    # A person's verdict on the feature of a facet is set against the hunt's own verdict.
+    answer = client.post("/api/review/verdict", json={"key": first["key"], "feature": "failure_never_stated",
+                                                      "step": 6, "worth": True})
+    assert answer.status_code == 200
+    client.post("/api/review/verdict", json={"key": rows[1]["key"], "feature": "failure_never_stated", "worth": True})
+    reviews = client.get("/api/review/hunt", params={"name": "misuse"}).json()["reviews"]
+    assert (reviews["verdicts"], reviews["agree"], [item["key"] for item in reviews["differ"]]) == (
+        2, 1, [rows[1]["key"]])
 
 
 def recorded_answers(project: Project) -> tuple[dict[int, dict[str, Any]], dict[tuple[int, tuple[str, ...]], Any]]:
@@ -504,8 +687,14 @@ def test_an_agent_session_hunts_as_the_aifn_functions_do(
             (replayed.hunting_dir / "misuse/1/state" / name).read_text(encoding="utf-8")
     for path in (replayed.hunts_dir / "misuse").iterdir():
         assert (session.hunts_dir / "misuse" / path.name).read_bytes() == path.read_bytes()
-    findings = [pq.read_table(project.tables_dir / f"{FINDINGS_TABLE}.parquet") for project in (replayed, session)]
-    assert findings[0].equals(findings[1])
+    verdicts = [pq.read_table(project.tables_dir / f"{VERDICTS_TABLE}.parquet") for project in (replayed, session)]
+    assert verdicts[0].equals(verdicts[1])
+    for project in (replayed, session):
+        assert [use.alias for use in Project.load(project.root).config.operators if use.use == "hunt.marks"] == [
+            "hunt-misuse"]
+    events = [read_table(project, "events").to_pandas().sort_values(["key", "rule", "step", "note"])
+              .reset_index(drop=True) for project in (replayed, session)]
+    assert events[0].equals(events[1])
     assert main(["hunt", "status", "misuse"]) == 0
     assert json.loads(capsys.readouterr().out)["phase"] == "finished"
 
@@ -533,17 +722,20 @@ def test_an_agent_session_hands_in_only_what_fits(tmp_path: Path, monkeypatch: p
         submit_proposal(session, "misuse")
     answer.write_text(json.dumps(proposal), encoding="utf-8")
     current = submit_proposal(session, "misuse")
-    assert current["phase"] == "verdicts" and [batch["answered"] for batch in current["batches"]] == [False, False]
+    # Two groups read with the hits, then one blind group of the two hit trajectories.
+    assert current["phase"] == "verdicts" and [batch["answered"] for batch in current["batches"]] == [False] * 3
+    blind = json.loads((workspace / current["batches"][2]["request"]).read_text("utf-8"))["cases"]
+    assert len(blind) == 2 and all(set(case) == {"file"} for case in blind)
     with pytest.raises(ConfigError, match="waits for its verdicts"):
         submit_proposal(session, "misuse")
     with pytest.raises(ConfigError, match="waits for the verdicts of an agent session"):
         hunt(session, "misuse", runner=NoCalls())
     with pytest.raises(ConfigError, match="are not written yet"):
         submit_verdicts(session, "misuse")
-    first, second = current["batches"]
+    first = current["batches"][0]
     files = [case["file"] for case in json.loads((workspace / first["request"]).read_text("utf-8"))["cases"]]
     named = [{"file": file, "found": True, "facet": "made_up", "steps": [3], "why": "w"} for file in files]
-    for batch in (first, second):
+    for batch in current["batches"]:
         (workspace / batch["answer"]).parent.mkdir(parents=True, exist_ok=True)
         (workspace / batch["answer"]).write_text(json.dumps({"verdicts": named}), encoding="utf-8")
     with pytest.raises(ConfigError, match="names facets facets.json lacks: \\['made_up'\\]"):

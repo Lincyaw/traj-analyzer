@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from traj_analyzer.files import read_yaml
 from traj_analyzer.project import ConfigError, Project
 
-NAME = re.compile(r"[a-z][a-z0-9_-]{0,39}")
-"""Name of a hunt; it becomes part of the names of its aifn functions."""
+NAME = re.compile(r"[a-z][a-z0-9_-]{0,34}")
+"""Name of a hunt; it becomes part of the names of its aifn functions and of its marks, `hunt-<name>`."""
 
 
 class HuntSpec(BaseModel):
@@ -33,14 +33,19 @@ class HuntSpec(BaseModel):
     """Reads every active probe with unread hits gets before the rest of the hit reads is shared out."""
     cases_per_call: int = Field(default=6, ge=1)
     """Trajectories one `hunt-verify` call reads."""
+    blind_reads: int = Field(default=6, ge=0)
+    """Hit reads of a round that other readers read once more without being shown the hits, which measures how much
+    the hits sway the verdicts."""
+    workers: int | None = Field(default=None, ge=1)
+    """aifn workers that read side by side; by default one per call of the round."""
     clusters: int = Field(default=40, ge=1)
     """Clusters of the trajectories that the coverage reads go through, the least read first."""
     probes_max: int = Field(default=20, ge=1)
     """Most active probes."""
     min_precision: float = Field(default=0.5, ge=0, le=1)
     """Precision below which the ledger asks for a probe to be revised."""
-    final_reads: int = Field(default=120, ge=0)
-    """Reads of the closing check, over the hits of the active probes no round read."""
+    final_reads: Annotated[int, Field(ge=0)] | Literal["all"] = 120
+    """Reads of the closing check, over the hits of the active probes no round read; `all` reads every one."""
     seed: int = 0
     model: str | None = None
     """Model of the hunt's functions; defaults to mining.model, then engine.model."""

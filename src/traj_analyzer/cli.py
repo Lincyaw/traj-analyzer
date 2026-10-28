@@ -15,16 +15,19 @@ from pydantic import ValidationError
 from traj_analyzer.adapters import discover_adapters
 from traj_analyzer.anomalies import context_frame, context_names, run_anomalies, spread
 from traj_analyzer.evaluation import evaluate, load_evaluation, reference_keys
-from traj_analyzer.extract import coverage, extract
+from traj_analyzer.extract import SubprocessWorkers, coverage, extract
 from traj_analyzer.files import parse_yaml
 from traj_analyzer.hunting import hunt
 from traj_analyzer.hunting.steps import close_hunt, start_hunt, status, submit_proposal, submit_verdicts
+from traj_analyzer.hunting.summary import summary
+from traj_analyzer.hunting.trial import try_probe
 from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.labels import labels_report
 from traj_analyzer.layers import describe_tables, discover_layers, enabled_layers
 from traj_analyzer.mining import compute_operator, load_code_operator, mine
 from traj_analyzer.operators.catalog import discover, edit_operators, load_groups
 from traj_analyzer.paths import PathTree, describe
+from traj_analyzer.preflight import preflight
 from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.reviews import Verdict, append_verdict, precision_by_feature, read_verdicts
 from traj_analyzer.sampling import Reference, enrich, load_sampler, needs_reference, sample, save
@@ -73,6 +76,13 @@ def cmd_init(directory: Annotated[str, typer.Argument(help="Directory of the new
 def cmd_ingest(datasets: Annotated[list[str] | None, typer.Argument(help="Datasets; default all.")] = None) -> None:
     """Read raw data into the unified form."""
     _emit({"ingested": ingest(Project.find(), datasets or None)})
+
+
+@app.command("check")
+def cmd_check() -> None:
+    """Check that the workers can run model calls: the engine's variables and patches, the dsh runtime and the aifn
+    bundle, and one call that runs a shell command in the sandbox of a call."""
+    _emit(preflight(Project.find(), SubprocessWorkers().spawn))
 
 
 def _enabled(project: Project) -> dict[str, list[str]]:
@@ -389,6 +399,26 @@ def cmd_hunt_verdicts(name: HuntName) -> None:
 def cmd_hunt_close(name: HuntName) -> None:
     """Close a run whose search has ended: write the cases of the closing check, or finish the run."""
     _emit(close_hunt(Project.find(), name))
+
+
+@hunt_app.command("try")
+def cmd_hunt_try(
+    name: HuntName,
+    file: Annotated[Path, typer.Argument(help="A probe: a .sql file, or a .py operator file named like the probe.")],
+) -> None:
+    """Run a probe over every trajectory of the hunt's last run, as a round runs it, and compare what it hits with the
+    verdicts so far and with the active probes."""
+    _emit(try_probe(Project.find(), name, file))
+
+
+@hunt_app.command("report")
+def cmd_hunt_report(
+    name: HuntName,
+    run: Annotated[int | None, typer.Option(min=1, help="The run; default the last finished one.")] = None,
+) -> None:
+    """What a finished run found, in brief: rounds with their minutes, facets, batches, probes, coverage, how blind
+    reads and people's verdicts agree, the marks, and where the files are."""
+    _emit(summary(Project.find(), name, run))
 
 
 @app.command("try")

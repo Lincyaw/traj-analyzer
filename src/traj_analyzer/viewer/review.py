@@ -17,6 +17,9 @@ from traj_analyzer.batches import META, assign
 from traj_analyzer.evaluation import FILE as EVALUATION_FILE
 from traj_analyzer.evaluation import Card, load_evaluation
 from traj_analyzer.features.table import KEY
+from traj_analyzer.hunting import VERDICTS_TABLE, load_hunt
+from traj_analyzer.hunting.spec import hunt_names
+from traj_analyzer.hunting.summary import finished_runs, summary
 from traj_analyzer.ingest import load_index
 from traj_analyzer.labels import TOP_SHARE
 from traj_analyzer.operators.base import FeatureSpec
@@ -130,6 +133,7 @@ class Review:
         self.frame: Frame = build_frame(project, database.groups, self.rows, project.config.sampling.vector_length)
         self.context = context_names(database.groups)
         self.stratum = assign(project, self.frame, self.rows, project.config.strata)
+        self.batch = assign(project, self.frame, self.rows, project.config.batches)
         self.turns = read_turns(project) if "turns" in self.tables else None
         self.events = read_events(project)
         self.covered = consequence_coverage(project)
@@ -502,6 +506,9 @@ class Review:
             "features": self._feature_values(key, anomaly[0]["batch"] if anomaly else None),
             "verdicts": [v.model_dump(mode="json") for v in read_verdicts(self.project) if v.key == key],
             "outputs": {name: d.info() for name, d in self.outputs.items()},
+            "hunts": self._rows(f"SELECT hunt, found, facet, steps, why, round, source, probes FROM "
+                                f"tables.{VERDICTS_TABLE} WHERE key = ? ORDER BY hunt", [key])
+            if self._has(VERDICTS_TABLE) else [],
         }
 
     def _course(self, key: str, steps: int) -> list[dict[str, Any]]:
@@ -654,6 +661,51 @@ class Review:
         if not (self.project.evaluation_dir / EVALUATION_FILE).is_file():
             return {}
         return {card.feature: card for card in load_evaluation(self.project).features}
+
+    # Hunts
+
+    def hunts(self) -> list[dict[str, Any]]:
+        """Every hunt of the project with what its last finished run found; a hunt without one has no run."""
+        out = []
+        for name in hunt_names(self.project):
+            need = load_hunt(self.project, name).need.strip()
+            if not finished_runs(self.project, name):
+                out.append({"hunt": name, "need": need, "run": None})
+                continue
+            found = summary(self.project, name)
+            out.append({key: found[key] for key in ("hunt", "run", "rounds", "converged", "found", "coverage")}
+                       | {"need": need, "facets": len(found["facets"]), "probes": len(found["probes"])})
+        return out
+
+    def hunt(self, name: str) -> dict[str, Any]:
+        """What the last finished run of a hunt found, and every trajectory it read or its marks point to: its
+        verdict, where the marks of the probes it kept are, and its batch."""
+        if name not in hunt_names(self.project):
+            raise HTTPException(404, f"Unknown hunt {name}")
+        need = load_hunt(self.project, name).need.strip()
+        if not finished_runs(self.project, name):
+            return {"hunt": name, "need": need, "run": None, "trajectories": []}
+        found = summary(self.project, name)
+        facets = found["marks"]["features"]
+        rows: dict[str, dict[str, Any]] = {}
+        if self._has(VERDICTS_TABLE):
+            for row in self._rows(f"SELECT key, found, facet, steps, why, round, source FROM tables.{VERDICTS_TABLE} "
+                                  "WHERE hunt = ?", [name]):
+                rows[row[KEY]] = {**row, "status": "found" if row["found"] else "rejected", "marks": []}
+        if self._has("events"):
+            for row in self._rows("SELECT key, rule, step, note FROM tables.events WHERE list_contains(?::VARCHAR[], "
+                                  "rule) ORDER BY key, step", [list(facets)]):
+                entry = rows.setdefault(row[KEY], {"key": row[KEY], "found": None, "facet": None, "steps": [],
+                                                   "why": "", "round": None, "source": None, "status": "unread",
+                                                   "marks": []})
+                entry["marks"].append({"feature": row["rule"], "facet": facets[row["rule"]], "step": row["step"],
+                                       "note": row["note"]})
+        order = {"found": 0, "unread": 1, "rejected": 2}
+        trajectories = sorted(rows.values(), key=lambda row: (order[row["status"]], row[KEY]))
+        for row in trajectories:
+            row["batch"] = self.batch.get(row[KEY])
+            row["stratum"] = self.stratum.get(row[KEY])
+        return {**found, "need": need, "trajectories": trajectories}
 
 
 def _plain_values(frame: Frame, column: str, spec: FeatureSpec) -> pd.Series:

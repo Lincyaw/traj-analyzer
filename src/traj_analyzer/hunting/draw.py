@@ -110,3 +110,15 @@ def draw(
         for key in sorted(rng.choice(pool, size=count, replace=False).tolist()):
             chosen.append(Draw(key=key, source="random", hits=[]))
     return chosen
+
+
+def blind_draws(spec: HuntSpec, draws: list[Draw], round_: int) -> list[Draw]:
+    """At most `blind_reads` of the drawn trajectories a probe hit, drawn at random, without their hits: other
+    readers read them once more as they read a trajectory no probe hits."""
+    hit = [drawn for drawn in draws if drawn.hits]
+    count = min(spec.blind_reads, len(hit))
+    if count == 0:
+        return []
+    rng = np.random.default_rng([spec.seed, round_, 1])
+    picks = sorted(rng.choice(len(hit), size=count, replace=False).tolist())
+    return [Draw(key=hit[i].key, source=hit[i].source, hits=[]) for i in picks]

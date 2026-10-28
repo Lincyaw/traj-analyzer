@@ -2,7 +2,7 @@
 
 Run `traj view` from an analysis project after ingesting trajectories and extracting features, and open http://127.0.0.1:8000.
 The server reads the project's Parquet tables into an in-memory DuckDB; the page fetches nothing from outside the server.
-The review pages follow the order in which a person looks at a batch of trajectories: the batches, the trajectories worth a look, one trajectory, and the features that pointed at them.
+The review pages follow the order in which a person looks at a batch of trajectories: the batches, the trajectories worth a look, one trajectory, the features that pointed at them, and the hunts with the trajectories they found.
 The data page, reached from the `Data` link, keeps the table browser and the Perspective charts for analyses the review pages do not anticipate.
 Every page is addressed by the fragment of the URL, so a view can be shared as a link.
 
@@ -42,6 +42,14 @@ Verdicts append to `reviews/verdicts.jsonl`, the file `traj review` writes, and 
 One row per feature and per-unit output with how it holds up: its role from `traj evaluate` and the noise of a judgment; how many anomalies it explains; the events its rule found and how many went unrecovered; the consequence lift of its events; the tail precision and lift the mining check gave it and whether it raises alerts; what the people who followed it found; and the batch where it moved furthest from the baseline.
 Columns sort on click, the name filter and the signal switch narrow the rows, and every count opens the trajectories behind it.
 Hover a column title for what it measures.
+
+## Hunts
+
+One row per hunt of the project with its last finished run: the rounds, the confirmed trajectories, how many of the trajectories were read, the facets and the probes kept.
+A hunt's page shows its need; the coverage with the bound on what the probes may still miss; the facets with their edge, their confirmed trajectories and the trajectories their marks point to; the batches and strata with their confirmed trajectories by facet; the probes kept with their precision and unread hits; how the blind reads agree with the reads that showed the hits; and how the verdicts people gave on the features of the facets agree with the hunt's.
+Below, every trajectory the hunt read or its marks point to: confirmed, marked and unread, or rejected, each with its facet, batch, the steps its verdict cites, the reason and its marks, narrowed by verdict and facet.
+A click opens the trajectory at the first step its verdict cites, or its first mark.
+On the page of a trajectory, the verdicts of the hunts that read it stand in the right column with their steps, and the marks appear in its course like any other event; the verdict form records, on the feature of a facet, whether the trajectory shows it.
 
 ## Data
 
