@@ -42,7 +42,7 @@ from traj_analyzer.layers import (
 )
 from traj_analyzer.operators.base import Aggregate, Evidenced, FeatureSpec
 from traj_analyzer.operators.catalog import Group, Instance, load_groups, runtime_groups
-from traj_analyzer.preflight import preflight
+from traj_analyzer.preflight import CHECKED, preflight
 from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.runtime import engine_env, issue_call, known_calls, mailbox, model_name, submitting_function
 from traj_analyzer.schema import Trajectory
@@ -81,10 +81,12 @@ def select_rows(
 FUNCTIONS_VARIABLE = "TRAJ_FUNCTIONS"
 """Environment variable naming the aifn functions a worker run processes, comma-separated; every function
 of the project when unset."""
+MAILBOX_VARIABLE = "TRAJ_MAILBOX"
+"""Environment variable naming the mailbox a worker run works from; the project's mailbox when unset."""
 
 
 class WorkerRunner(Protocol):
-    def check(self, project: Project) -> None: ...
+    def check_credentials(self, project: Project) -> None: ...
 
     def run(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None: ...
 
@@ -93,26 +95,25 @@ class SubprocessWorkers:
     """Run aifn worker processes that exit once the queue is empty.
 
     With `functions`, the workers take only the calls of those functions, so a run processes its own calls and
-    leaves the calls other runs left pending alone. Before the first workers start, one call checks that a worker
-    can run a call at all.
+    leaves the calls other runs left pending alone. Before the first workers of a project start in this process,
+    one call checks that a worker can run a call at all.
     """
 
-    def __init__(self) -> None:
-        self.checked = False
-
-    def check(self, project: Project) -> None:
+    def check_credentials(self, project: Project) -> None:
         engine_env(project)
 
     def run(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None:
-        if not self.checked:
+        if project.root not in CHECKED:
             preflight(project, self.spawn)
-            self.checked = True
         self.spawn(project, count, functions)
 
-    def spawn(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None:
+    def spawn(self, project: Project, count: int, functions: frozenset[str] = frozenset(),
+              mailbox: Path | None = None) -> None:
         env = {**os.environ, "TRAJ_PROJECT": str(project.root)}
         if functions:
             env[FUNCTIONS_VARIABLE] = ",".join(sorted(functions))
+        if mailbox is not None:
+            env[MAILBOX_VARIABLE] = str(mailbox)
         command = [sys.executable, "-m", "aifn", "worker", "traj_analyzer.worker:make_worker",
                    "--once", "--id"]
         processes = [subprocess.Popen([*command, f"traj-{n}"], env=env, stdout=sys.stderr)
@@ -176,7 +177,7 @@ def run_groups(
     code = [g for g in selected if g.is_code]
     judged = [g for g in selected if not g.is_code]
     if judged and not dry_run:
-        runner.check(project)
+        runner.check_credentials(project)
     writes_tables = not dry_run and directory is None and not second
     scan = _scan(project, code, judged, rows, dry_run, directory, writes_tables)
     if not judged:

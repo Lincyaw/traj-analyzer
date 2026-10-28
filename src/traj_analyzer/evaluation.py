@@ -13,7 +13,7 @@ from sklearn.metrics import r2_score
 from sklearn.model_selection import KFold, cross_val_predict
 from sklearn.tree import DecisionTreeRegressor
 
-from traj_analyzer.extract import WorkerRunner, run_groups
+from traj_analyzer.extract import SubprocessWorkers, WorkerRunner, run_groups
 from traj_analyzer.features.table import KEY, feature_values, read_group, status_column
 from traj_analyzer.ingest import IndexRow, load_index
 from traj_analyzer.operators.base import FeatureSpec
@@ -464,6 +464,8 @@ def evaluate(project: Project, *, workers: int | None = None, runner: WorkerRunn
     by_key = {row.key: row for row in rows}
     measured: dict[str, list[str]] = {}
     noises: dict[str, tuple[float | None, int]] = {}
+    # One runner for every group, so the check that a worker can run a call runs once.
+    runner = runner or SubprocessWorkers()
     for group in llm:
         measured[group.name] = evaluation_set(project, extracted[group.name])
         run_groups(project, [group], [by_key[key] for key in measured[group.name]], workers=workers, runner=runner,

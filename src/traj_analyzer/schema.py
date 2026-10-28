@@ -40,8 +40,9 @@ class Trajectory(BaseModel):
     """The harness that ran the agent, naming the profile `harness/<name>.py` that reads its tool calls; None when
     the adapter knows no harness."""
     recorded_calls: list[str] | None = None
-    """The tools of the calls the source records apart from the conversation, such as the calls a recorder saw in
-    the responses of the model; `traj ingest` checks that the steps hold a call of each. None when the source records
+    """The tools of the calls the source reports apart from the conversation, such as the calls a recorder saw in the
+    responses of the model; they can be a part of the agent's calls, where the source reports one form of call and
+    not another. `traj ingest` stops at a trajectory whose steps lack one of them. None when the source reports
     none."""
 
     @property

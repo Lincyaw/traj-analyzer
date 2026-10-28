@@ -6,7 +6,7 @@ from typing import Any
 from traj_analyzer.features.spec import value_validator
 from traj_analyzer.files import load_module
 from traj_analyzer.harness import discover_harnesses, harness_for
-from traj_analyzer.ingest import load_trajectory
+from traj_analyzer.ingest import load_trajectory, shown_keys
 from traj_analyzer.layers import compute_tables, enabled_layers
 from traj_analyzer.operators.base import Evidenced, FeatureSpec, Operator
 from traj_analyzer.project import Project
@@ -26,10 +26,13 @@ def load_code_operator(path: Path, spec: FeatureSpec | None = None) -> Operator:
 
 
 def compute_operator(
-    project: Project, operator: Operator, keys: list[str]
+    project: Project, operator: Operator, keys: list[str], hidden: list[str] | None = None
 ) -> tuple[dict[str, Any], dict[str, tuple[int, ...]]]:
     """The operator's value on each of these trajectories, leaving out those it does not apply to, and the steps
-    each value rests on when the operator gives them."""
+    each value rests on when the operator gives them.
+
+    With `hidden`, the metadata keys it names are kept from the operator, as they are kept from every model.
+    """
     (feature,) = operator.outputs(operator.params())
     check = value_validator(feature)
     params = operator.params()
@@ -39,6 +42,8 @@ def compute_operator(
     steps: dict[str, tuple[int, ...]] = {}
     for key in keys:
         trajectory = load_trajectory(project, key)
+        if hidden:
+            trajectory = trajectory.model_copy(update={"metadata": shown_keys(trajectory.metadata, hidden)})
         if operator.requires is not None and not operator.requires(trajectory):
             continue
         _, tables = compute_tables(trajectory, layers, project.config.render, harness_for(trajectory, harnesses))

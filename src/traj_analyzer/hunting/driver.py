@@ -3,21 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
+import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from aifn import Access, Refused, Returned
 from pydantic import BaseModel
 
-from traj_analyzer.batches import assign
 from traj_analyzer.calls import WorkspaceCalls
 from traj_analyzer.extract import SubprocessWorkers, WorkerRunner, extract
-from traj_analyzer.hunting.draw import Draw, blind_draws, clusters_of, draw, hits_of
+from traj_analyzer.hunting.draw import Draw, blind_draws, draw, hits_of
 from traj_analyzer.hunting.functions import (
     FACETS,
     FINDINGS,
@@ -38,7 +35,7 @@ from traj_analyzer.hunting.functions import (
     hunt_functions,
     propose_instruction,
 )
-from traj_analyzer.hunting.kept import Kept, KeptProbe, read_kept, write_kept
+from traj_analyzer.hunting.kept import Kept, KeptProbe, write_kept
 from traj_analyzer.hunting.ledger import (
     HuntState,
     ProbeState,
@@ -53,64 +50,24 @@ from traj_analyzer.hunting.ledger import (
 )
 from traj_analyzer.hunting.marks import OPERATOR, marks_instance
 from traj_analyzer.hunting.probes import HITS_SCHEMA, probe_path, run_probes
-from traj_analyzer.hunting.spec import HuntSpec, hunt_model, load_hunt
+from traj_analyzer.hunting.run import (
+    FINAL,
+    PENDING,
+    REPORT,
+    Hunt,
+    note_step,
+    open_hunt,
+    over,
+    resume,
+    save_state,
+    start,
+)
+from traj_analyzer.hunting.verdicts import write_verdicts
 from traj_analyzer.hunting.workspace import prepare, write_case, write_file
-from traj_analyzer.ingest import load_index
-from traj_analyzer.layers.tables import column, read_table, table_path, with_key
+from traj_analyzer.layers.tables import read_table
 from traj_analyzer.operators.catalog import edit_operators, load_groups
 from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.runtime import known_calls, mailbox
-from traj_analyzer.vectorize import Matrix, build_frame
-
-WORKSPACE = "workspace"
-STATE = "state"
-REPORT = "report.json"
-CLUSTERS = "clusters.json"
-TIMELINE = "timeline.jsonl"
-"""When every step of a run was opened and done, one JSON line each."""
-PENDING = "pending.json"
-"""A round of an agent session that waits for its verdicts (section 18.9 of the design)."""
-FINAL = "final"
-"""Directory of the closing check under `rounds/` of the workspace."""
-VERDICTS_TABLE = "hunt_verdicts"
-VERDICTS_SCHEMA = pa.schema([
-    column("hunt", pa.string(), "The hunt that read the trajectory, `hunts/<hunt>.yaml`."),
-    column("found", pa.bool_(), "Whether the trajectory shows what the hunt's need describes."),
-    column("facet", pa.string(), "When found, the kind of behaviour of the need it shows."),
-    column("step", pa.int64(), "When found, the first step where it shows."),
-    column("steps", pa.list_(pa.int64()), "When found, every step where it shows, as the verdict cites them."),
-    column("why", pa.string(), "What the verdict saw, naming the steps."),
-    column("round", pa.int64(), "The round that read the trajectory; the round after the last for the closing "
-                                "check."),
-    column("source", pa.string(), "Why it was read: hit, a probe hit it; coverage, drawn from the cluster read "
-                                  "least; random, drawn at random from the trajectories no probe hits; final, read by "
-                                  "the closing check."),
-    column("probes", pa.list_(pa.string()), "The probes that hit the trajectory when it was read."),
-])
-Step = Literal["propose", "read", "close"]
-
-
-@dataclass(frozen=True)
-class Hunt:
-    """What every round of one run of a hunt shares."""
-
-    name: str
-    spec: HuntSpec
-    project: Project
-    directory: Path
-    keys: list[str]
-    matrix: Matrix
-    clusters: dict[str, int]
-    batches: dict[str, tuple[str, str]]
-    """Per trajectory, its batch and stratum under `batches` and `strata` of traj.yaml."""
-
-    @property
-    def workspace(self) -> Path:
-        return self.directory / WORKSPACE
-
-    @property
-    def model(self) -> str:
-        return hunt_model(self.project, self.spec)
 
 
 class Reads(BaseModel):
@@ -129,29 +86,6 @@ Answers = list[tuple[list[Case], dict[str, CaseVerdict], str]]
 """The verdicts per group of cases, each group with the reason a case of it without a verdict has none."""
 
 
-def open_hunt(project: Project, name: str, *, create: bool, max_rounds: int | None = None) -> Hunt:
-    """The run of a hunt with what its rounds share; `create` starts a new run when the last one is finished."""
-    spec = load_hunt(project, name)
-    if max_rounds is not None:
-        spec = HuntSpec.model_validate({**spec.model_dump(), "max_rounds": max_rounds})
-    rows = sorted(load_index(project, None if spec.datasets == "all" else spec.datasets), key=lambda row: row.key)
-    if not rows:
-        raise ConfigError(f"Hunt {name} has no trajectories; run `traj ingest`")
-    if not table_path(project, "steps").is_file():
-        raise ConfigError("No tables yet; run `traj extract`")
-    frame = build_frame(project, load_groups(project), rows, project.config.sampling.vector_length)
-    if not frame.columns:
-        raise ConfigError("No extracted features tell the trajectories apart; run `traj extract`")
-    keys = [row.key for row in rows]
-    directory = run_directory(project, name) if create else open_run(project, name)
-    matrix = frame.matrix(dict.fromkeys(frame.columns, 1.0))
-    batch = assign(project, frame, rows, project.config.batches)
-    stratum = assign(project, frame, rows, project.config.strata)
-    return Hunt(name=name, spec=spec, project=project, directory=directory, keys=keys, matrix=matrix,
-                clusters=_clusters(directory, keys, matrix, spec),
-                batches={key: (str(batch[key]), str(stratum[key])) for key in keys})
-
-
 def hunt(
     project: Project, name: str, *, max_rounds: int | None = None, workers: int | None = None,
     runner: WorkerRunner | None = None,
@@ -165,7 +99,7 @@ def hunt(
     answered from the mailbox.
     """
     runner = runner or SubprocessWorkers()
-    runner.check(project)
+    runner.check_credentials(project)
     found = open_hunt(project, name, create=True, max_rounds=max_rounds)
     if (found.directory / PENDING).is_file():
         raise ConfigError(f"Round of {found.directory} waits for the verdicts of an agent session; hand them in "
@@ -174,94 +108,19 @@ def hunt(
     calls = WorkspaceCalls(project=project, runner=runner, workers=workers or found.spec.workers, box=box,
                            known=known_calls(box), functions=hunt_functions(project, name, found.spec),
                            workspace=found.workspace)
-    calls.placed.update(prepare(project, found.workspace, name, found.spec, found.keys))
+    calls.placed.update(prepare(project, found.workspace, found.spec, found.keys))
     state = resume(found.directory) or start(project, name)
     while not over(found.spec, state):
         state = run_round(found, calls, state)
         save_state(found, state)
     draws = closing_draws(found, state)
     if not draws:
-        return finish(found, state, [], [], [])
+        return finish(found, state, [], [], [], [])
     note_step(found, state.round + 1, "close", "open")
     reads = write_reads(found, draws, f"rounds/{FINAL}", state.round + 1)
-    readings, blind, unanswered = ask_verdicts(found, calls, state, reads, state.round + 1)
+    readings, blind, unanswered, blind_unanswered = ask_verdicts(found, calls, state, reads, state.round + 1)
     note_step(found, state.round + 1, "close", "done")
-    return finish(found, state, readings, blind, unanswered)
-
-
-def over(spec: HuntSpec, state: HuntState) -> bool:
-    """Whether the search has ended: `patience` rounds in a row without a new finding, or `max_rounds` rounds."""
-    return state.quiet >= spec.patience or state.round >= spec.max_rounds
-
-
-def run_directory(project: Project, name: str) -> Path:
-    """The directory of the run to continue: the last one when it has no report yet, a new one otherwise."""
-    root = project.hunting_dir / name
-    numbers = sorted(int(p.name) for p in root.glob("[0-9]*") if p.is_dir() and p.name.isdigit())
-    number = numbers[-1] if numbers else 1
-    if (root / str(number) / REPORT).is_file():
-        number += 1
-    directory = root / str(number)
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def last_run(project: Project, name: str) -> Path | None:
-    root = project.hunting_dir / name
-    numbers = sorted(int(p.name) for p in root.glob("[0-9]*") if p.is_dir() and p.name.isdigit())
-    return root / str(numbers[-1]) if numbers else None
-
-
-def open_run(project: Project, name: str) -> Path:
-    """The run of the hunt in progress."""
-    directory = last_run(project, name)
-    if directory is None or (directory / REPORT).is_file():
-        raise ConfigError(f"Hunt {name} has no run in progress; start one with `traj hunt start {name}`")
-    return directory
-
-
-def _clusters(directory: Path, keys: list[str], matrix: Matrix, spec: HuntSpec) -> dict[str, int]:
-    """The clusters of the run, computed when it starts and kept for every round of it."""
-    path = directory / CLUSTERS
-    if path.is_file():
-        clusters: dict[str, int] = json.loads(path.read_text(encoding="utf-8"))
-        if sorted(clusters) != keys:
-            raise ConfigError(f"The trajectories of the hunt changed since its run in {directory} started; remove "
-                              f"that directory to start the run again")
-        return clusters
-    clusters = clusters_of(keys, matrix, spec.clusters, spec.seed)
-    path.write_text(json.dumps(clusters, indent=1, sort_keys=True), encoding="utf-8")
-    return clusters
-
-
-def resume(directory: Path) -> HuntState | None:
-    """The state after the last finished round of a run; None before its first round finishes."""
-    states = sorted((directory / STATE).glob("*.json"), key=lambda path: int(path.stem))
-    if not states:
-        return None
-    return HuntState.model_validate_json(states[-1].read_text(encoding="utf-8"))
-
-
-def save_state(hunt: Hunt, state: HuntState) -> None:
-    (hunt.directory / STATE).mkdir(exist_ok=True)
-    (hunt.directory / STATE / f"{state.round}.json").write_text(state.model_dump_json(indent=1), encoding="utf-8")
-
-
-def note_step(hunt: Hunt, number: int, step: Step, event: Literal["open", "done"]) -> None:
-    """Record in the timeline of the run that a step of a round was opened or done."""
-    line = {"round": number, "step": step, "event": event, "at": datetime.now(UTC).isoformat(timespec="seconds")}
-    with (hunt.directory / TIMELINE).open("a", encoding="utf-8") as out:
-        out.write(json.dumps(line) + "\n")
-
-
-def start(project: Project, name: str) -> HuntState:
-    """The state a first round starts from: the facets and probes the hunt kept from its last run, when it has."""
-    kept = read_kept(project.hunts_dir / name)
-    if kept is None:
-        return HuntState()
-    probes = [ProbeState(name=entry.name, facet=entry.facet, kind=entry.kind, why=entry.why, since=0, text=text)
-              for entry, text in kept.probes]
-    return HuntState(facets=kept.facets, probes=probes)
+    return finish(found, state, readings, blind, unanswered, blind_unanswered)
 
 
 def propose_request(hunt: Hunt, number: int) -> ProposeRequest:
@@ -286,9 +145,9 @@ def run_round(hunt: Hunt, calls: WorkspaceCalls, state: HuntState) -> HuntState:
     failed, retired, draws = begin_round(hunt, state, proposal, number)
     note_step(hunt, number, "read", "open")
     reads = write_reads(hunt, draws, f"rounds/{number}", number)
-    readings, blind, unanswered = ask_verdicts(hunt, calls, state, reads, number)
+    readings, blind, unanswered, blind_unanswered = ask_verdicts(hunt, calls, state, reads, number)
     note_step(hunt, number, "read", "done")
-    return end_round(hunt, state, number, readings, blind, unanswered, failed, sorted(retired))
+    return end_round(hunt, state, number, readings, blind, unanswered, blind_unanswered, failed, sorted(retired))
 
 
 def begin_round(
@@ -337,7 +196,7 @@ def groups(hunt: Hunt, cases: list[Case]) -> list[list[Case]]:
 
 def ask_verdicts(
     hunt: Hunt, calls: WorkspaceCalls, state: HuntState, reads: Reads, number: int
-) -> tuple[list[Reading], list[Reading], list[str]]:
+) -> tuple[list[Reading], list[Reading], list[str], list[str]]:
     """Read the cases with the aifn function of the hunt, one call per group, all calls side by side."""
     files = digests(hunt.workspace, [NEED, FACETS, SCENARIO])
     chunks = [*reads.groups, *reads.blind_groups]
@@ -359,13 +218,17 @@ def ask_verdicts(
 
 def record(
     state: HuntState, reads: Reads, answers: Answers, blind_answers: Answers, number: int
-) -> tuple[list[Reading], list[Reading], list[str]]:
-    """What every case showed, the blind reads apart, with the trajectories that got no verdict. A facet a verdict
-    with the hits reports as new joins the facets of `state`; one a blind verdict reports stays out."""
+) -> tuple[list[Reading], list[Reading], list[str], list[str]]:
+    """What every case showed, the blind reads apart, with the trajectories that got no verdict, theirs apart too.
+
+    A facet a verdict with the hits reports as new joins the facets of `state`; one a blind verdict reports stays
+    out, so a blind verdict naming it gets no verdict of its own.
+    """
     unanswered: list[str] = []
+    blind_unanswered: list[str] = []
     readings = _readings(state, reads.draws, reads.files, answers, number, unanswered, adds=True)
-    blind = _readings(state, reads.blind, reads.files, blind_answers, number, unanswered, adds=False)
-    return readings, blind, unanswered
+    blind = _readings(state, reads.blind, reads.files, blind_answers, number, blind_unanswered, adds=False)
+    return readings, blind, unanswered, blind_unanswered
 
 
 def _readings(
@@ -375,13 +238,12 @@ def _readings(
     drawn_by_file = {files[drawn.key]: drawn for drawn in draws}
     readings: list[Reading] = []
     facets = {facet.name for facet in state.facets}
-    label = "" if adds else "blind read of "
     for chunk, verdicts, missing in answers:
         for case in chunk:
             drawn = drawn_by_file[case.file]
             verdict = verdicts.get(case.file)
             if verdict is None:
-                unanswered.append(f"{label}{drawn.key}: {missing}")
+                unanswered.append(f"{drawn.key}: {missing}")
                 continue
             facet = verdict.facet
             if verdict.found and facet == NEW:
@@ -391,7 +253,7 @@ def _readings(
                     state.facets.append(verdict.new_facet)
                     facets.add(facet)
             elif verdict.found and facet not in facets:
-                unanswered.append(f"{label}{drawn.key}: the verdict names the facet {facet}, which {FACETS} lacks")
+                unanswered.append(f"{drawn.key}: the verdict names the facet {facet}, which {FACETS} lacks")
                 continue
             readings.append(Reading(key=drawn.key, round=number, source=drawn.source, hits=drawn.hits,
                                     found=verdict.found, facet=facet, steps=verdict.steps, why=verdict.why))
@@ -400,7 +262,7 @@ def _readings(
 
 def end_round(
     hunt: Hunt, state: HuntState, number: int, readings: list[Reading], blind: list[Reading], unanswered: list[str],
-    failed: dict[str, str], retired: list[str],
+    blind_unanswered: list[str], failed: dict[str, str], retired: list[str],
 ) -> HuntState:
     """Add the readings of a round to the state, with its record and whether it brought a new finding."""
     new = new_findings(state, readings)
@@ -410,8 +272,8 @@ def end_round(
     state.blind.extend(blind)
     state.rounds.append(RoundRecord(
         round=number, reads=dict(Counter(reading.source for reading in readings)), blind=len(blind),
-        unanswered=unanswered, failed=sorted(failed), retired=retired, found=sum(reading.found for reading in readings),
-        new=new, quiet=state.quiet))
+        unanswered=unanswered, blind_unanswered=blind_unanswered, failed=sorted(failed), retired=retired,
+        found=sum(reading.found for reading in readings), new=new, quiet=state.quiet))
     write_file(hunt.workspace, f"rounds/{number}/verdicts.json",
                _json([reading.model_dump(mode="json") for reading in readings]))
     write_file(hunt.workspace, f"rounds/{number}/blind.json", _json([reading.model_dump(mode="json")
@@ -493,7 +355,8 @@ def closing_draws(hunt: Hunt, state: HuntState) -> list[Draw] | None:
 
 
 def finish(
-    hunt: Hunt, state: HuntState, final: list[Reading], blind: list[Reading], unanswered: list[str]
+    hunt: Hunt, state: HuntState, final: list[Reading], blind: list[Reading], unanswered: list[str],
+    blind_unanswered: list[str],
 ) -> dict[str, Any]:
     """Write the verdicts table and the report, keep the active probes for the next run, mark every trajectory with
     them, and return the report."""
@@ -523,9 +386,9 @@ def finish(
         "unverified": {probe: [key for key in keys if key not in state.readings]
                        for probe, keys in state.hits.items()},
         "final": {"read": len(final), "found": sum(reading.found for reading in final), "blind": len(blind),
-                  "unanswered": unanswered},
+                  "unanswered": unanswered, "blind_unanswered": blind_unanswered},
         "per_round": [record.model_dump(mode="json") for record in state.rounds],
-        "marks": mark_trajectories(project, hunt.name),
+        "marks": mark_trajectories(hunt, state),
     }
     (hunt.directory / REPORT).write_text(_json(report), encoding="utf-8")
     return report
@@ -548,23 +411,6 @@ def batch_counts(hunt: Hunt, state: HuntState) -> list[dict[str, Any]]:
     return rows
 
 
-def write_verdicts(project: Project, name: str, readings: list[Reading]) -> None:
-    """Replace the hunt's rows of the verdicts table with every trajectory it read."""
-    rows = [{"key": reading.key, "hunt": name, "found": reading.found, "facet": reading.facet,
-             "step": min(reading.steps) if reading.steps else None, "steps": reading.steps, "why": reading.why,
-             "round": reading.round, "source": reading.source,
-             "probes": sorted({hit.probe for hit in reading.hits})}
-            for reading in sorted(readings, key=lambda r: r.key)]
-    schema = with_key(VERDICTS_SCHEMA)
-    table = pa.Table.from_pylist(rows, schema=schema)
-    path = table_path(project, VERDICTS_TABLE)
-    if path.is_file():
-        kept = pq.read_table(path, schema=schema)
-        table = pa.concat_tables([kept.filter(pc.not_equal(kept["hunt"], name)), table])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, path)
-
-
 def keep_probes(project: Project, name: str, state: HuntState, probes: list[dict[str, Any]]) -> None:
     """Write the facets and the active probes to `hunts/<name>/`, where the next run of the hunt starts from them and
     the marks read them."""
@@ -576,9 +422,17 @@ def keep_probes(project: Project, name: str, state: HuntState, probes: list[dict
     write_kept(project.hunts_dir / name, Kept(facets=state.facets, probes=kept))
 
 
-def mark_trajectories(project: Project, name: str) -> dict[str, Any]:
-    """Enable the marks of the hunt in traj.yaml, unless they are enabled, and compute them on every trajectory;
-    return the group, the facet of every feature, and per feature the marked trajectories."""
+def mark_trajectories(hunt: Hunt, state: HuntState) -> dict[str, Any]:
+    """Enable the marks of the hunt in traj.yaml, compute them on every trajectory, and check that they are the
+    positions the last round found; return the group, the facet of every feature, and per feature the marked
+    trajectories.
+
+    A probe finds its positions over every trajectory of the hunt at once in a round, and over one trajectory at a
+    time in the marks, so a probe whose result depends on the other trajectories, such as one comparing a step with
+    an average over the batch, marks something the round never read. The comparison is what catches it; a run whose
+    marks differ keeps no probes enabled.
+    """
+    project, name = hunt.project, hunt.name
     group = marks_instance(name)
 
     def enable(operators: list[Any]) -> None:
@@ -589,9 +443,31 @@ def mark_trajectories(project: Project, name: str) -> dict[str, Any]:
     extract(edited, groups=[group])
     ((instance,),) = [found.instances for found in load_groups(edited, [group])]
     events = read_table(edited, "events").to_pandas()
-    marked = events[events["rule"].isin(list(instance.original))].groupby("rule")["key"].nunique()
+    marked = events[events["rule"].isin(list(instance.original))]
+    differing = _differing_probes(hunt, state, marked)
+    if differing:
+        edit_operators(edited, lambda operators: operators.__setitem__(
+            slice(None), [use for use in operators if use.get("as") != group]))
+        raise ConfigError(f"The probes {differing} of hunt {name} mark the trajectories of the project at other "
+                          f"positions than they found in round {state.round}, so what they find in a trajectory "
+                          f"depends on the other trajectories; the marks of the hunt are not enabled. Revise those "
+                          f"probes in `hunts/{name}/` so that each reads one trajectory at a time, and run "
+                          f"`traj hunt run {name}` again.")
+    counts = marked.groupby("rule")["key"].nunique()
     return {"group": group, "features": dict(instance.original),
-            "marked": {feature: int(marked.get(feature, 0)) for feature in instance.original}}
+            "marked": {feature: int(counts.get(feature, 0)) for feature in instance.original}}
+
+
+def _differing_probes(hunt: Hunt, state: HuntState, marked: pd.DataFrame) -> list[str]:
+    """The probes whose marks on the trajectories of the hunt are not the positions the last round found."""
+    hits = pq.read_table(hunt.workspace / "rounds" / str(state.round) / "hits.parquet").to_pandas()
+    found = {(row.probe, row.key, int(row.step), row.note) for row in hits.itertuples()}
+    inside = marked[marked["key"].isin(hunt.keys)]
+    now = set()
+    for row in inside.itertuples():
+        probe, _, note = str(row.note).partition(": ")
+        now.add((probe, row.key, int(row.step), note))
+    return sorted({probe for probe, *_ in found ^ now})
 
 
 def digests(workspace: Path, files: list[str]) -> dict[str, str]:

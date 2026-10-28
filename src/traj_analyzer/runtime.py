@@ -68,6 +68,15 @@ def engine_env(project: Project) -> dict[str, str]:
     return {name: os.environ[name] for name in names}
 
 
+def patch_files(project: Project) -> tuple[Path, ...]:
+    """The dsh patch files of `engine.patches`, resolved; they add the provider routes a call needs."""
+    paths = tuple((project.root / Path(path).expanduser()).resolve() for path in project.config.engine.patches)
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise ConfigError(f"engine.patches files do not exist: {missing}")
+    return paths
+
+
 def _identity(call: Call) -> str:
     """What aifn compares to reuse a call: everything except the id and the time it was issued."""
     return json.dumps(call.model_dump(mode="json", exclude={"id", "issued_at"}), sort_keys=True)

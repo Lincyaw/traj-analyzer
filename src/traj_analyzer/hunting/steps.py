@@ -9,26 +9,14 @@ from pydantic import BaseModel, ValidationError
 
 from traj_analyzer.hunting.draw import Draw
 from traj_analyzer.hunting.driver import (
-    FINAL,
-    PENDING,
-    REPORT,
-    WORKSPACE,
     Answers,
-    Hunt,
     Reads,
     begin_round,
     closing_draws,
     end_round,
     finish,
-    last_run,
-    note_step,
-    open_hunt,
-    over,
     propose_request,
     record,
-    resume,
-    save_state,
-    start,
     write_reads,
     write_state,
 )
@@ -42,6 +30,20 @@ from traj_analyzer.hunting.functions import (
     verify_instruction,
 )
 from traj_analyzer.hunting.ledger import HuntState
+from traj_analyzer.hunting.run import (
+    FINAL,
+    PENDING,
+    REPORT,
+    WORKSPACE,
+    Hunt,
+    last_run,
+    note_step,
+    open_hunt,
+    over,
+    resume,
+    save_state,
+    start,
+)
 from traj_analyzer.hunting.spec import load_hunt
 from traj_analyzer.hunting.workspace import prepare, write_file
 from traj_analyzer.project import ConfigError, Project
@@ -89,7 +91,7 @@ def start_hunt(project: Project, name: str) -> dict[str, Any]:
     """Start a run of the hunt for an agent session, or continue the one in progress: prepare the workspace and
     write what the next step reads."""
     hunt = open_hunt(project, name, create=True)
-    prepare(project, hunt.workspace, name, hunt.spec, hunt.keys)
+    prepare(project, hunt.workspace, hunt.spec, hunt.keys)
     if not (hunt.directory / PENDING).is_file():
         state = resume(hunt.directory) or start(project, name)
         if not over(hunt.spec, state):
@@ -189,14 +191,15 @@ def submit_verdicts(project: Project, name: str) -> dict[str, Any]:
             raise ConfigError(f"{batch.answer} names facets facets.json lacks: {unknown}; a new kind of behaviour "
                               f"is `{NEW}` with `new_facet`")
         (blind if batch.blind else answers).append((batch.cases, verdicts, "the answer gave no verdict for it"))
-    readings, blind_readings, unanswered = record(pending.state, pending.reads, answers, blind, pending.round)
+    readings, blind_readings, unanswered, blind_unanswered = record(pending.state, pending.reads, answers, blind,
+                                                                    pending.round)
     note_step(hunt, pending.round, "close" if pending.final else "read", "done")
     if pending.final:
-        finish(hunt, pending.state, readings, blind_readings, unanswered)
+        finish(hunt, pending.state, readings, blind_readings, unanswered, blind_unanswered)
         path.unlink()
         return status(project, name)
-    state = end_round(hunt, pending.state, pending.round, readings, blind_readings, unanswered, pending.failed,
-                      pending.retired)
+    state = end_round(hunt, pending.state, pending.round, readings, blind_readings, unanswered, blind_unanswered,
+                      pending.failed, pending.retired)
     save_state(hunt, state)
     path.unlink()
     if not over(hunt.spec, state):
@@ -214,7 +217,7 @@ def close_hunt(project: Project, name: str) -> dict[str, Any]:
                           f"nothing new or {hunt.spec.max_rounds} rounds have run; see `traj hunt status {name}`")
     draws = closing_draws(hunt, state)
     if not draws:
-        finish(hunt, state, [], [], [])
+        finish(hunt, state, [], [], [], [])
         return status(project, name)
     open_verdicts(hunt, state.round + 1, True, state.model_copy(deep=True), draws, {}, [])
     return status(project, name)

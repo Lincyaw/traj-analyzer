@@ -8,9 +8,9 @@ from typing import Any
 import pandas as pd
 import pyarrow.parquet as pq
 
-from traj_analyzer.hunting.driver import CLUSTERS, WORKSPACE, last_run, resume
 from traj_analyzer.hunting.ledger import HuntState
 from traj_analyzer.hunting.probes import readable_tables, run_code, run_sql
+from traj_analyzer.hunting.run import CLUSTERS, WORKSPACE, last_run, resume
 from traj_analyzer.hunting.spec import load_hunt
 from traj_analyzer.project import ConfigError, Project
 
@@ -39,7 +39,7 @@ def try_probe(project: Project, name: str, file: Path) -> dict[str, Any]:
         if file.suffix == ".sql":
             found = run_sql(workspace, file.read_text(encoding="utf-8"), keys, readable_tables(project))
         else:
-            found = run_code(project, file.resolve(), probe, keys)
+            found = run_code(project, file.resolve(), probe, keys, project.config.render.hide_metadata)
     except Exception as error:
         raise ConfigError(f"the probe does not run: {type(error).__name__}: {error}") from error
     state = resume(directory) or HuntState()

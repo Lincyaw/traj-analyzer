@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from ruamel.yaml import YAML
 
 from traj_analyzer.files import read_yaml
 from traj_analyzer.hunting.functions import Facet
+from traj_analyzer.project import ConfigError
 
 FACETS_FILE = "facets.yaml"
 PROBES_FILE = "probes.yaml"
@@ -42,10 +43,19 @@ def read_kept(directory: Path) -> Kept | None:
     """What a finished run kept in `directory`; None before any run of the hunt finished."""
     if not (directory / PROBES_FILE).is_file():
         return None
-    facets = [Facet.model_validate(facet) for facet in read_yaml(directory / FACETS_FILE)]
+    facets = [_facet(value, directory / FACETS_FILE) for value in read_yaml(directory / FACETS_FILE)]
     entries = [KeptProbe.model_validate(entry) for entry in read_yaml(directory / PROBES_FILE)]
     return Kept(facets=facets, probes=[(entry, (directory / entry.file).read_text(encoding="utf-8"))
                                        for entry in entries])
+
+
+def _facet(value: Any, path: Path) -> Facet:
+    """One facet of a kept file, with the path in the error of one that does not fit; a facet kept before the edge
+    of a facet existed has none, and needs its edge written in."""
+    try:
+        return Facet.model_validate(value)
+    except ValidationError as error:
+        raise ConfigError(f"{path} holds a facet that does not fit: {error}") from error
 
 
 def write_kept(directory: Path, kept: Kept) -> None:

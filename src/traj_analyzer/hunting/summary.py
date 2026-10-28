@@ -7,20 +7,15 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
-from traj_analyzer.hunting.driver import REPORT, TIMELINE, VERDICTS_TABLE
+from traj_analyzer.hunting.run import REPORT, TIMELINE, finished_runs
 from traj_analyzer.hunting.spec import load_hunt
+from traj_analyzer.hunting.verdicts import VERDICTS_TABLE
 from traj_analyzer.layers.tables import table_path
 from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.reviews import read_verdicts
 
 LISTED = 20
 """Trajectories listed per part of the summary."""
-
-
-def finished_runs(project: Project, name: str) -> list[int]:
-    """The runs of the hunt that have a report, in order."""
-    root = project.hunting_dir / name
-    return sorted(int(path.parent.name) for path in root.glob(f"*/{REPORT}") if path.parent.name.isdigit())
 
 
 def finished_run(project: Project, name: str, run: int | None) -> Path:
@@ -40,12 +35,10 @@ def finished_run(project: Project, name: str, run: int | None) -> Path:
 
 def timeline_minutes(path: Path) -> dict[tuple[int, str], float]:
     """Minutes from the opening of every step of a run to its end, by round and step; a step opened again after a
-    stop counts from its last opening."""
+    stop counts from its last opening, and a step not done has no entry."""
     opened: dict[tuple[int, str], datetime] = {}
     minutes: dict[tuple[int, str], float] = {}
-    if not path.is_file():
-        return minutes
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").rstrip("\n").split("\n"):
         entry = json.loads(line)
         step = (entry["round"], entry["step"])
         at = datetime.fromisoformat(entry["at"])
@@ -60,10 +53,10 @@ def review_agreement(project: Project, name: str, features: dict[str, str]) -> d
     """How the verdicts people gave on the marks of the hunt agree with the hunt's own verdicts: a person who found a
     trajectory worth a look for the feature of a facet agrees with a hunt verdict that found that facet in it."""
     path = table_path(project, VERDICTS_TABLE)
-    read = {}
-    if path.is_file():
-        table = pq.read_table(path).to_pandas()
-        read = {row.key: (bool(row.found), row.facet) for row in table[table["hunt"] == name].itertuples()}
+    if not path.is_file():
+        raise ConfigError(f"{path} does not exist, although the hunt wrote a report; run `traj hunt run {name}` again")
+    table = pq.read_table(path).to_pandas()
+    read = {row.key: (bool(row.found), row.facet) for row in table[table["hunt"] == name].itertuples()}
     latest = {(verdict.feature, verdict.key): verdict for verdict in read_verdicts(project)
               if verdict.feature in features}
     agree, unread = 0, 0
@@ -86,9 +79,14 @@ def summarize_run(project: Project, name: str, run: int | None = None) -> dict[s
     batches, the active probes, the coverage, how blind reads and people's verdicts agree, and where the files are."""
     directory = finished_run(project, name, run)
     report = json.loads((directory / REPORT).read_text(encoding="utf-8"))
+    missing = sorted({"calibration", "batches", "marks"} - set(report))
+    if missing:
+        raise ConfigError(f"{directory / REPORT} lacks {missing}, so it was written by an earlier version of the "
+                          f"hunt; run `traj hunt run {name}` again for a report this command can read")
     minutes = timeline_minutes(directory / TIMELINE)
     rounds = [{"round": record["round"], "reads": record["reads"], "blind": record["blind"],
                "found": record["found"], "new": len(record["new"]), "unanswered": len(record["unanswered"]),
+               "blind_unanswered": len(record["blind_unanswered"]),
                "minutes": {step: minutes.get((record["round"], step)) for step in ("propose", "read")}}
               for record in report["per_round"]]
     closing = report["rounds"] + 1
@@ -99,6 +97,7 @@ def summarize_run(project: Project, name: str, run: int | None = None) -> dict[s
         "found": report["found"],
         "per_round": rounds,
         "final": {**report["final"], "unanswered": len(report["final"]["unanswered"]),
+                  "blind_unanswered": len(report["final"]["blind_unanswered"]),
                   "minutes": minutes.get((closing, "close"))},
         "facets": [{"name": facet["name"], "edge": facet["edge"], "found": facet["found"],
                     "definition": facet["definition"]} for facet in report["facets"]],

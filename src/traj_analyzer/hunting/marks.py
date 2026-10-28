@@ -6,11 +6,12 @@ from typing import Any, Literal
 
 import pyarrow as pa
 
+from traj_analyzer.hunting.contents import CONTENTS, CONTENTS_SCHEMA, contents_rows
 from traj_analyzer.hunting.functions import Facet
 from traj_analyzer.hunting.kept import KeptProbe, read_kept
-from traj_analyzer.hunting.probes import CONTENTS, CONTENTS_SCHEMA, contents_rows, mark_sql, tables_read
+from traj_analyzer.hunting.probes import mark_connection, mark_sql, tables_read
 from traj_analyzer.hunting.spec import load_hunt
-from traj_analyzer.ingest import visible_metadata
+from traj_analyzer.ingest import shown_keys, visible_metadata
 from traj_analyzer.layers.tables import KEY, Tables, with_key
 from traj_analyzer.mining.operators import load_code_operator
 from traj_analyzer.operators.base import Event, Operator
@@ -66,31 +67,45 @@ def trajectory_relations(trajectory: Trajectory, tables: Tables, hidden: list[st
     """The tables of one trajectory as a SQL probe reads them: with their key column, the whole text of the steps as
     `contents`, and the metadata `hidden` names left out."""
     found = dict(tables.arrow)
-    trajectories = found["trajectories"].to_pylist()
-    for row in trajectories:
-        row["metadata"] = visible_metadata(row["metadata"], hidden)
-    found["trajectories"] = pa.Table.from_pylist(trajectories, schema=found["trajectories"].schema)
+    found["trajectories"] = _shown_trajectories(found["trajectories"], hidden)
     found[CONTENTS] = pa.Table.from_pylist(contents_rows(trajectory), schema=CONTENTS_SCHEMA)
     return {name: table.add_column(0, with_key(table.schema).field(KEY), pa.array([trajectory.key] * table.num_rows,
                                                                                     pa.string()))
             for name, table in found.items()}
 
 
+def _shown_trajectories(table: pa.Table, hidden: list[str]) -> pa.Table:
+    rows = table.to_pylist()
+    for row in rows:
+        row["metadata"] = visible_metadata(row["metadata"], hidden)
+    return pa.Table.from_pylist(rows, schema=table.schema)
+
+
 def mark_trajectory(marks: Marks, trajectory: Trajectory, tables: Tables) -> dict[str, Any]:
     """Per facet, the events of its probes in one trajectory, each note naming the probe; None for every facet on a
-    trajectory of a dataset the hunt does not cover."""
+    trajectory of a dataset the hunt does not cover.
+
+    Both kinds of probe read the trajectory with the metadata `render.hide_metadata` names left out, as the tables
+    of the workspace leave it out for the probes of a round.
+    """
     if not marks.covers(trajectory):
         return {facet.name: None for facet in marks.facets}
     found: dict[str, list[dict[str, Any]]] = {facet.name: [] for facet in marks.facets}
     if marks.sql:
-        shown = trajectory_relations(trajectory, tables, marks.hidden)
+        relations = trajectory_relations(trajectory, tables, marks.hidden)
+        connection = mark_connection(relations)
+        names = set(relations)
         for entry, text in marks.sql:
-            for row in mark_sql(text, shown, trajectory.key).itertuples():
+            for row in mark_sql(connection, text, names, trajectory.key).itertuples():
                 found[entry.facet].append(Event(step=int(row.step), note=f"{entry.name}: {row.note}")
                                           .model_dump(mode="json"))
-    for entry, operator in marks.code:
-        for value in operator.compute(trajectory, tables, operator.params())[entry.name] or []:
-            event = Event.model_validate(value)
-            found[entry.facet].append(event.model_copy(update={"note": f"{entry.name}: {event.note}"})
-                                      .model_dump(mode="json"))
+    if marks.code:
+        shown = trajectory.model_copy(update={"metadata": shown_keys(trajectory.metadata, marks.hidden)})
+        inside = Tables({**tables.arrow, "trajectories": _shown_trajectories(tables.arrow["trajectories"],
+                                                                            marks.hidden)})
+        for entry, operator in marks.code:
+            for value in operator.compute(shown, inside, operator.params())[entry.name] or []:
+                event = Event.model_validate(value)
+                found[entry.facet].append(event.model_copy(update={"note": f"{entry.name}: {event.note}"})
+                                          .model_dump(mode="json"))
     return {name: sorted(events, key=lambda event: (event["step"], event["note"])) for name, events in found.items()}

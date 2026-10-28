@@ -22,7 +22,7 @@ class WorkspaceCalls:
     project: Project
     runner: WorkerRunner
     workers: int | None
-    """Workers that run side by side, never more than the calls left; None runs one per call left."""
+    """Workers that run side by side, never more than the calls left; None takes `extract.workers`."""
     box: Mailbox
     known: dict[str, str]
     functions: dict[str, AiFunction[Any, Any]]
@@ -35,7 +35,8 @@ class WorkspaceCalls:
         """Run workers until every call has a conclusion, and return the conclusions in order."""
         open_calls = sum(handle.poll() is None for handle in handles)
         if open_calls:
-            self.runner.run(self.project, min(open_calls, self.workers or open_calls), frozenset(self.functions))
+            count = min(open_calls, self.workers or self.project.config.extract.workers)
+            self.runner.run(self.project, count, frozenset(self.functions))
         results = [handle.poll() for handle in handles]
         if any(result is None for result in results):
             raise RuntimeError("aifn workers exited with calls left without a conclusion; a call claimed by a "

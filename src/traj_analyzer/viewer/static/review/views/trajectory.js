@@ -6,23 +6,24 @@ import { append, bar, chip, clear, el, fmt } from "../dom.js";
 
 const PREVIEW = 160;
 
-export async function render(container, { params, path, navigate }) {
+export async function render(container, { params, path, navigate, address }) {
   const key = path[0];
   if (!key) {
     navigate("trajectories");
     return;
   }
   const [data, filters] = await Promise.all([get("review/trajectory", { key }), loadFilters()]);
-  const view = new TrajectoryView(container, key, data, filters);
+  const view = new TrajectoryView(container, key, data, filters, address);
   view.render(params.step === undefined ? null : Number(params.step));
 }
 
 class TrajectoryView {
-  constructor(container, key, data, filters) {
+  constructor(container, key, data, filters, address) {
     this.container = container;
     this.key = key;
     this.data = data;
     this.filters = filters;
+    this.address = address;
     this.turns = data.turns;
     this.events = data.turns.flatMap((turn) => turn.events).filter((event) => !event.recovered).sort((a, b) => a.step - b.step);
     this.selected = null;
@@ -224,7 +225,7 @@ class TrajectoryView {
       return null;
     }
     return el("section", { class: "panel" }, el("h2", { text: "Hunts" }), this.data.hunts.map((verdict) => el("div", { class: "feature-line" },
-      el("span", { class: "feature-name" }, el("a", { class: "link", href: `#/hunts?name=${encodeURIComponent(verdict.hunt)}`, text: verdict.hunt })),
+      el("span", { class: "feature-name" }, el("a", { class: "link", href: this.address("hunts", { name: verdict.hunt }), text: verdict.hunt })),
       chip(verdict.found ? `confirmed: ${fmt.words(verdict.facet)}` : "rejected", { kind: verdict.found ? "alert" : "muted", title: `Read in round ${verdict.round}, drawn as ${verdict.source}.` }),
       el("span", { class: "evidence" }, (verdict.steps ?? []).map((step) =>
         el("button", { class: "step-ref link", text: `#${step}`, title: "A step the verdict cites", on: { click: () => this.select(step) } }))),

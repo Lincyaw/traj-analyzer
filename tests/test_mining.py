@@ -67,7 +67,7 @@ class MiningReplay:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
-    def check(self, project: Project) -> None:
+    def check_credentials(self, project: Project) -> None:
         pass
 
     def run(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None:

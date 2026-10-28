@@ -139,6 +139,7 @@ class Review:
         self.covered = consequence_coverage(project)
         self._overviews: dict[tuple[str, ...], dict[str, Any]] = {}
         self._load_reasons()
+        self._load_hunts()
 
     # Loading
 
@@ -664,28 +665,35 @@ class Review:
 
     # Hunts
 
+    def _load_hunts(self) -> None:
+        """Read what the last finished run of every hunt found, when the server starts, so the summary of a hunt and
+        the rows under it come from the one snapshot the pages show."""
+        self._hunts: dict[str, dict[str, Any]] = {}
+        for name in hunt_names(self.project):
+            need = load_hunt(self.project, name).need.strip()
+            found = summarize_run(self.project, name) if finished_runs(self.project, name) else {"run": None}
+            self._hunts[name] = {**found, "hunt": name, "need": need}
+
     def hunts(self) -> list[dict[str, Any]]:
         """Every hunt of the project with what its last finished run found; a hunt without one has no run."""
         out = []
-        for name in hunt_names(self.project):
-            need = load_hunt(self.project, name).need.strip()
-            if not finished_runs(self.project, name):
-                out.append({"hunt": name, "need": need, "run": None})
+        for name, found in self._hunts.items():
+            if found["run"] is None:
+                out.append({"hunt": name, "need": found["need"], "run": None})
                 continue
-            found = summarize_run(self.project, name)
-            out.append({key: found[key] for key in ("hunt", "run", "rounds", "converged", "found", "coverage")}
-                       | {"need": need, "facets": len(found["facets"]), "probes": len(found["probes"])})
+            out.append({key: found[key] for key in ("hunt", "need", "run", "rounds", "converged", "found",
+                                                    "coverage")}
+                       | {"facets": len(found["facets"]), "probes": len(found["probes"])})
         return out
 
     def hunt(self, name: str) -> dict[str, Any]:
         """What the last finished run of a hunt found, and every trajectory it read or its marks point to: its
         verdict, where the marks of the probes it kept are, and its batch."""
-        if name not in hunt_names(self.project):
+        found = self._hunts.get(name)
+        if found is None:
             raise HTTPException(404, f"Unknown hunt {name}")
-        need = load_hunt(self.project, name).need.strip()
-        if not finished_runs(self.project, name):
-            return {"hunt": name, "need": need, "run": None, "trajectories": []}
-        found = summarize_run(self.project, name)
+        if found["run"] is None:
+            return {"hunt": name, "need": found["need"], "run": None, "trajectories": []}
         facets = found["marks"]["features"]
         rows: dict[str, dict[str, Any]] = {}
         if self._has(VERDICTS_TABLE):
@@ -705,7 +713,7 @@ class Review:
         for row in trajectories:
             row["batch"] = self.batch.get(row[KEY])
             row["stratum"] = self.stratum.get(row[KEY])
-        return {**found, "need": need, "trajectories": trajectories}
+        return {**found, "trajectories": trajectories}
 
 
 def _plain_values(frame: Frame, column: str, spec: FeatureSpec) -> pd.Series:

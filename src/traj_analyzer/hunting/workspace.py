@@ -4,19 +4,16 @@ import shutil
 import sys
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-
 from traj_analyzer import schema as schema_module
 from traj_analyzer.events import library as rules_library
 from traj_analyzer.events import rules as rules_module
+from traj_analyzer.hunting.contents import CONTENTS, CONTENTS_SCHEMA, write_contents
 from traj_analyzer.hunting.functions import NEED, SCENARIO
-from traj_analyzer.hunting.probes import CONTENTS, CONTENTS_SCHEMA, contents_rows, readable_tables
+from traj_analyzer.hunting.probes import readable_tables
 from traj_analyzer.hunting.spec import HuntSpec
 from traj_analyzer.ingest import load_trajectory, render_markdown
 from traj_analyzer.layers import describe_tables
 from traj_analyzer.layers import tables as tables_module
-from traj_analyzer.layers.tables import with_key
 from traj_analyzer.mining.workspace import FILES as MINING_FILES
 from traj_analyzer.mining.workspace import write_tables
 from traj_analyzer.operators import base as operator_base
@@ -43,9 +40,9 @@ def write_file(workspace: Path, name: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def prepare(project: Project, workspace: Path, name: str, spec: HuntSpec, keys: list[str]) -> set[str]:
-    """Fill the workspace of the hunt `name` with what every round starts from: the trajectories, the tables, the
-    need, the files a code probe imports, and the description of it all; return the names of the files written.
+def prepare(project: Project, workspace: Path, spec: HuntSpec, keys: list[str]) -> set[str]:
+    """Fill the workspace of the hunt with what every round starts from: the trajectories, the tables, the need, the
+    files a code probe imports, and the description of it all; return the names of the files written.
 
     Every file is written from the project's state alone, so a hunt that runs again starts from the same files.
     """
@@ -72,16 +69,10 @@ def prepare(project: Project, workspace: Path, name: str, spec: HuntSpec, keys: 
     readable = ", ".join(f"`{table}`" for table in sorted(readable_tables(project) & set(schemas)))
     readme = (FILES / "README.md").read_text(encoding="utf-8")
     write_file(workspace, "README.md", readme.replace("{python}", str(python))
-               .replace("{traj}", str(python.with_name("traj"))).replace("{hunt}", name)
+               .replace("{traj}", str(python.with_name("traj"))).replace("{hunt}", spec.name)
                .replace("{readable}", readable).replace("{tables}", describe_tables(schemas)))
     shutil.copyfile(MINING_FILES / "query.py", workspace / "query.py")
     return written
-
-
-def write_contents(project: Project, keys: list[str], path: Path) -> None:
-    """The whole text of every step of these trajectories, which the steps table and the trajectory files cut."""
-    rows = [{"key": key, **row} for key in keys for row in contents_rows(load_trajectory(project, key))]
-    pq.write_table(pa.Table.from_pylist(rows, schema=with_key(CONTENTS_SCHEMA)), path)
 
 
 def write_case(project: Project, workspace: Path, directory: str, key: str) -> str:

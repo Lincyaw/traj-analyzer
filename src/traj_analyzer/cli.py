@@ -134,7 +134,8 @@ def cmd_operators_list(tag: Annotated[str | None, typer.Option(help="Only operat
             continue
         rows.append({
             "name": name, "kind": operator.kind, "unit": operator.unit, "origin": ref.origin,
-            "tags": list(operator.tags), "tables": list(operator.tables), "description": operator.description,
+            "tags": list(operator.tags), "tables": list(operator.tables_with(operator.params())),
+            "description": operator.description,
             "outputs": [f.name for f in operator.outputs(operator.params())],
             "enabled_as": enabled.get(name, []),
         })
@@ -153,7 +154,8 @@ def cmd_operators_show(name: str) -> None:
     params = operator.params()
     _emit({
         "name": ref.name, "kind": operator.kind, "unit": operator.unit, "origin": ref.origin, "path": str(ref.path),
-        "tags": list(operator.tags), "tables": list(operator.tables), "description": operator.description,
+        "tags": list(operator.tags), "tables": list(operator.tables_with(params)),
+        "description": operator.description,
         "requires": None if operator.requires is None else operator.requires.__name__,
         "params_schema": operator.params.model_json_schema(), "params_default": params.model_dump(mode="json"),
         "outputs": [f.model_dump(mode="json") for f in operator.outputs(params)],

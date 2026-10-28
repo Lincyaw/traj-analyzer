@@ -9,27 +9,17 @@ import pyarrow as pa
 import sqlglot
 from sqlglot import exp
 
+from traj_analyzer.hunting.contents import CONTENTS
 from traj_analyzer.hunting.ledger import ProbeState
 from traj_analyzer.layers import discover_layers
-from traj_analyzer.layers.tables import column
 from traj_analyzer.mining.operators import compute_operator, load_code_operator
 from traj_analyzer.project import Project
-from traj_analyzer.schema import Trajectory
 
 COLUMNS = ["key", "step", "note"]
 """What a probe finds, one row per position."""
 HITS = ["probe", *COLUMNS]
 HITS_SCHEMA = pa.schema([("probe", pa.string()), ("key", pa.string()), ("step", pa.int64()), ("note", pa.string())])
 """Every position the probes of a round found, as `rounds/<round>/hits.parquet` of the workspace holds them."""
-CONTENTS = "contents"
-CONTENTS_SCHEMA = pa.schema([
-    column("step", pa.int64(), "The number after # in the step heading of the trajectory file."),
-    column("role", pa.string(), "user, assistant, tool or system."),
-    column("kind", pa.string(), "message, thinking, tool_call, tool_result or notice."),
-    column("name", pa.string(), "The tool of a tool call or tool result, or the name of a notice."),
-    column("content", pa.string(), "The whole text of the step, never cut."),
-    column("arguments", pa.string(), "The JSON arguments of a tool call, when the adapter parsed the call."),
-])
 TABLE = re.compile(r"tables/([a-z][a-z0-9_]*)\.parquet")
 """How a SQL probe names a table."""
 
@@ -40,12 +30,6 @@ class ProbeError(ValueError):
 
 def probe_path(workspace: Path, probe: ProbeState) -> Path:
     return workspace / "probes" / f"{probe.name}.{'sql' if probe.kind == 'sql' else 'py'}"
-
-
-def contents_rows(trajectory: Trajectory) -> list[dict[str, object]]:
-    """The whole text of every step of the trajectory, which the steps table and the trajectory files cut."""
-    return [{"step": step.index, "role": step.role, "kind": step.kind, "name": step.name, "content": step.content,
-             "arguments": step.arguments} for step in trajectory.steps]
 
 
 def readable_tables(project: Project) -> set[str]:
@@ -99,29 +83,34 @@ def run_sql(workspace: Path, text: str, keys: set[str], readable: set[str]) -> p
     return checked(_positions(connection, text), keys)
 
 
-def mark_sql(text: str, relations: dict[str, pa.Table], key: str) -> pd.DataFrame:
-    """The positions one SQL probe finds in one trajectory, whose tables `relations` holds with their key column;
-    the probe reads nothing else."""
+def mark_connection(relations: dict[str, pa.Table]) -> duckdb.DuckDBPyConnection:
+    """A connection that reads the tables of one trajectory under the paths a probe names, and nothing else."""
     connection = duckdb.connect()
     for name, table in relations.items():
         connection.register(f"tables/{name}.parquet", table)
     connection.execute("SET enable_external_access = false")
+    return connection
+
+
+def mark_sql(connection: duckdb.DuckDBPyConnection, text: str, tables: set[str], key: str) -> pd.DataFrame:
+    """The positions one SQL probe finds in one trajectory, whose tables the connection holds."""
     _one_select(connection, text)
-    missing = sorted(tables_read(text) - set(relations))
+    missing = sorted(tables_read(text) - tables)
     if missing:
         raise ProbeError(f"the probe reads the tables {missing}, which are not computed for {key}; traj.yaml enables "
                          f"the layers that write them")
     return checked(_positions(connection, text), {key})
 
 
-def run_code(project: Project, path: Path, name: str, keys: set[str]) -> pd.DataFrame:
-    """The positions one code probe finds: the events of its one output on every trajectory of the hunt."""
+def run_code(project: Project, path: Path, name: str, keys: set[str], hidden: list[str]) -> pd.DataFrame:
+    """The positions one code probe finds: the events of its one output on every trajectory of the hunt, which it
+    reads with the metadata `hidden` names left out, as a SQL probe reads the tables of the workspace."""
     operator = load_code_operator(path)
     (feature,) = operator.outputs(operator.params())
     if feature.type != "event" or feature.name != name:
         raise ProbeError(f"a code probe has one output of type event named {name}; this one has {feature.type} "
                          f"{feature.name}")
-    values, _ = compute_operator(project, operator, sorted(keys))
+    values, _ = compute_operator(project, operator, sorted(keys), hidden=hidden)
     rows = [{"key": key, "step": event["step"], "note": event["note"]}
             for key, events in values.items() for event in events]
     return checked(pd.DataFrame(rows, columns=COLUMNS), keys)
@@ -148,6 +137,7 @@ def run_probes(
     found = []
     failed: dict[str, str] = {}
     readable = readable_tables(project)
+    hidden = project.config.render.hide_metadata
     for probe in probes:
         path = probe_path(workspace, probe)
         # A probe written by a model can fail in any way; every failure is recorded for the next proposal.
@@ -155,7 +145,7 @@ def run_probes(
             if probe.kind == "sql":
                 frame = run_sql(workspace, path.read_text(encoding="utf-8"), keys, readable)
             else:
-                frame = run_code(project, path, probe.name, keys)
+                frame = run_code(project, path, probe.name, keys, hidden)
         except Exception as error:
             failed[probe.name] = f"{type(error).__name__}: {error}"
             continue

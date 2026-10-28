@@ -51,6 +51,8 @@ class RoundRecord(BaseModel):
     """Hit reads read once more by readers not shown the hits."""
     unanswered: list[str] = Field(default_factory=list)
     """Trajectories drawn whose case got no verdict; they stay unread."""
+    blind_unanswered: list[str] = Field(default_factory=list)
+    """Blind reads whose case got no verdict; they count toward no probe and no finding either way."""
     failed: list[str] = Field(default_factory=list)
     """Probes that failed to run."""
     retired: list[str] = Field(default_factory=list)
@@ -155,7 +157,11 @@ def coverage(state: HuntState, keys: list[str], clusters: dict[str, int]) -> dic
 
 
 def ledger(state: HuntState, spec: HuntSpec, keys: list[str], clusters: dict[str, int]) -> dict[str, Any]:
-    """What the next proposal reads: the probes, the facets, the rounds and the coverage."""
+    """What the next proposal reads: the probes, the facets, the rounds and the coverage.
+
+    A round's record comes without the blind reads that got no verdict: the blind reads measure the readers, and
+    nothing about them tells the proposal which probe to tighten.
+    """
     facets = {facet.name: 0 for facet in state.facets}
     for reading in state.readings.values():
         if reading.found and reading.facet is not None:
@@ -164,7 +170,7 @@ def ledger(state: HuntState, spec: HuntSpec, keys: list[str], clusters: dict[str
         "round": state.round, "quiet": state.quiet, "patience": spec.patience,
         "probes": probe_ledger(state, spec),
         "facets": [{"name": name, "found": count} for name, count in facets.items()],
-        "rounds": [record.model_dump(mode="json") for record in state.rounds],
+        "rounds": [record.model_dump(mode="json", exclude={"blind_unanswered"}) for record in state.rounds],
         "coverage": coverage(state, keys, clusters),
     }
 

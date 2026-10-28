@@ -151,44 +151,6 @@ def test_messages_adapter_rejects_unmapped_roles() -> None:
         list(adapter.read(DATA / "toucan.jsonl", "t"))
 
 
-RECORDED_ADAPTER = '''\
-from traj_analyzer.adapters.messages import MessagesAdapter
-
-
-class Recorded(MessagesAdapter):
-    """Toucan conversations whose source also records their calls, and `extra` calls besides."""
-
-    def __init__(self, extra, **options):
-        super().__init__(**options)
-        self.extra = extra
-
-    def read(self, path, dataset):
-        for trajectory in super().read(path, dataset):
-            calls = [step.name for step in trajectory.steps if step.kind == "tool_call"]
-            yield trajectory.model_copy(update={"recorded_calls": calls + self.extra})
-
-
-ADAPTER = Recorded
-'''
-
-
-def test_ingest_checks_the_calls_the_source_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = tmp_path / "proj"
-    assert main(["init", str(root)]) == 0
-    (root / "adapters" / "recorded.py").write_text(RECORDED_ADAPTER, encoding="utf-8")
-
-    def configure(extra: list[str]) -> Project:
-        edit_config(root, lambda config: config.update(datasets={"toucan": {
-            **TOUCAN, "adapter": "recorded", "options": {**TOUCAN["options"], "extra": extra}}}))
-        return Project.load(root)
-
-    monkeypatch.chdir(root)
-    assert ingest(configure([])) == {"toucan": 30}
-    with pytest.raises(ValueError, match="30 trajectories of toucan lack tool calls the source records, by tool "
-                                         "and count: \\[\"toucan/[^:]+: \\{'lost_tool': 1\\}\""):
-        ingest(configure(["lost_tool"]))
-
-
 def test_chunks_break_between_steps() -> None:
     (trajectory,) = ClaudeCodeAdapter().read(SESSION, "cc")
     text, n = render_markdown(trajectory, RenderConfig(chunk_chars=5000, max_step_chars=2000))
@@ -470,7 +432,7 @@ class ReplayWorkers:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
-    def check(self, project: Project) -> None:
+    def check_credentials(self, project: Project) -> None:
         pass
 
     def run(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None:

@@ -47,29 +47,32 @@ def _ingest_one(project: Project, name: str) -> int:
     adapter = load_adapter(config.adapter, config.options, project.root)
     project.dataset_dir(name).mkdir(parents=True, exist_ok=True)
     rows: dict[str, IndexRow] = {}
-    lacking: list[str] = []
     for path in input_files(config, project.root):
         for trajectory in adapter.read(path, name):
             trajectory = trajectory.model_copy(update={"id": safe_id(trajectory.id)})
             if trajectory.id in rows:
                 raise ValueError(f"Duplicate trajectory id {trajectory.id} in {path}")
-            missing = unparsed_calls(trajectory)
-            if missing:
-                lacking.append(f"{trajectory.key}: {dict(missing)}")
+            check_recorded_calls(trajectory, path)
             rows[trajectory.id] = _write(project, trajectory, config.description)
-    if lacking:
-        raise ValueError(f"{len(lacking)} trajectories of {name} lack tool calls the source records, by tool and "
-                         f"count: {lacking[:10]}")
     write_jsonl(project.dataset_dir(name) / INDEX_FILE, (row.model_dump_json() for row in rows.values()))
     return len(rows)
 
 
-def unparsed_calls(trajectory: Trajectory) -> Counter[str]:
-    """The calls the source records that the steps of the trajectory lack, counted by tool."""
+def check_recorded_calls(trajectory: Trajectory, path: Path) -> None:
+    """Stop at this trajectory when its steps lack a call the source records, counted by tool.
+
+    The recorded calls are what the source reports of the agent's calls, which can be a part of them: the recorder
+    of a proxy may report the function calls of a response and not the calls a model sends in another form. So every
+    recorded call has to appear among the parsed calls, and a parsed call the source does not report is no error.
+    """
     if trajectory.recorded_calls is None:
-        return Counter()
+        return
     parsed = Counter(step.name or "" for step in trajectory.steps if step.kind == "tool_call")
-    return Counter(trajectory.recorded_calls) - parsed
+    missing = Counter(trajectory.recorded_calls) - parsed
+    if missing:
+        raise ValueError(f"{trajectory.key} of {path} lacks tool calls the source records, by tool and count "
+                         f"{dict(missing)}; the adapter parsed {sum(parsed.values())} calls of "
+                         f"{len(trajectory.recorded_calls)} recorded")
 
 
 def input_files(config: DatasetConfig, root: Path) -> Iterator[Path]:
@@ -108,11 +111,15 @@ def _is_scalar(value: Any) -> bool:
     return value is None or isinstance(value, str | int | float | bool)
 
 
+def shown_keys(metadata: dict[str, Any], patterns: list[str]) -> dict[str, Any]:
+    """The metadata without the keys `render.hide_metadata` keeps from the models that read a trajectory."""
+    return {key: value for key, value in metadata.items()
+            if not any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)}
+
+
 def visible_metadata(text: str, patterns: list[str]) -> str:
-    """The metadata of the trajectories table, JSON text, without the keys `render.hide_metadata` keeps from models."""
-    shown = {key: value for key, value in json.loads(text).items()
-             if not any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)}
-    return json.dumps(shown, ensure_ascii=False, sort_keys=True)
+    """The metadata of the trajectories table, JSON text, with the hidden keys left out."""
+    return json.dumps(shown_keys(json.loads(text), patterns), ensure_ascii=False, sort_keys=True)
 
 
 def render_markdown(trajectory: Trajectory, render: RenderConfig, description: str = "") -> tuple[str, int]:
@@ -123,8 +130,7 @@ def render_markdown(trajectory: Trajectory, render: RenderConfig, description: s
     header = [f"# {trajectory.key}", ""]
     if description:
         header += [description.strip(), ""]
-    shown = {k: v for k, v in trajectory.metadata.items()
-             if not any(fnmatch.fnmatchcase(k, pattern) for pattern in render.hide_metadata)}
+    shown = shown_keys(trajectory.metadata, render.hide_metadata)
     if shown:
         header += ["```json", json.dumps(shown, ensure_ascii=False, indent=1), "```", ""]
     chunks: list[list[str]] = [[]]
@@ -169,8 +175,7 @@ def _header(trajectory: Trajectory, title: str, render: RenderConfig, descriptio
     header = [f"# {trajectory.key} {title}", ""]
     if description:
         header += [description.strip(), ""]
-    shown = {k: v for k, v in trajectory.metadata.items()
-             if not any(fnmatch.fnmatchcase(k, pattern) for pattern in render.hide_metadata)}
+    shown = shown_keys(trajectory.metadata, render.hide_metadata)
     if shown:
         header += ["```json", json.dumps(shown, ensure_ascii=False, indent=1), "```", ""]
     return header

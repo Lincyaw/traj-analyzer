@@ -17,6 +17,8 @@ class HuntSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    name: str = Field(pattern=NAME.pattern)
+    """The hunt's name, from the name of its file; `load_hunt` sets it."""
     need: str = Field(min_length=1)
     """What the trajectories worth finding show, in the words of the person who asks."""
     datasets: Literal["all"] | list[str] = "all"
@@ -37,7 +39,7 @@ class HuntSpec(BaseModel):
     """Hit reads of a round that other readers read once more without being shown the hits, which measures how much
     the hits sway the verdicts."""
     workers: int | None = Field(default=None, ge=1)
-    """aifn workers that read side by side; by default one per call of the round."""
+    """aifn workers that read side by side; `extract.workers` by default."""
     clusters: int = Field(default=40, ge=1)
     """Clusters of the trajectories that the coverage reads go through, the least read first."""
     probes_max: int = Field(default=20, ge=1)
@@ -70,7 +72,8 @@ def load_hunt(project: Project, name: str) -> HuntSpec:
     path = project.hunts_dir / f"{name}.yaml"
     if not path.is_file():
         raise ConfigError(f"No hunt {name}: {path} does not exist")
-    spec = HuntSpec.model_validate(read_yaml(path))
+    # The file name is the hunt's name, so the file itself names no other.
+    spec = HuntSpec.model_validate({**read_yaml(path), "name": name})
     if spec.datasets != "all":
         unknown = sorted(set(spec.datasets) - set(project.config.datasets))
         if unknown:

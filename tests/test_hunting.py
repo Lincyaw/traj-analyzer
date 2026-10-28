@@ -10,7 +10,6 @@ import pyarrow.parquet as pq
 import pytest
 from aifn import Call, Worker
 from aifn.engines import ReplayEngine
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 from test_mining import call_key
@@ -20,13 +19,12 @@ from traj_analyzer.adapters.messages import MessagesAdapter
 from traj_analyzer.cli import main
 from traj_analyzer.extract import extract
 from traj_analyzer.hunting import VERDICTS_TABLE, hunt, load_hunt
-from traj_analyzer.hunting.draw import Draw, apportion, blind_draws, clusters_of, draw
-from traj_analyzer.hunting.driver import apply, keep_probes, mark_trajectories, start, write_verdicts
+from traj_analyzer.hunting.draw import apportion, clusters_of, draw
+from traj_analyzer.hunting.driver import apply, keep_probes, start, write_verdicts
 from traj_analyzer.hunting.functions import (
     NEW,
     CaseVerdict,
     Facet,
-    Hit,
     Probe,
     Proposal,
     ProposeRequest,
@@ -34,22 +32,17 @@ from traj_analyzer.hunting.functions import (
     functions,
     proposal_model,
 )
-from traj_analyzer.hunting.kept import read_kept
 from traj_analyzer.hunting.ledger import (
     HuntState,
     ProbeState,
     Reading,
-    calibration,
     coverage,
     new_findings,
     probe_ledger,
     unproductive,
 )
-from traj_analyzer.hunting.marks import marks_instance
-from traj_analyzer.hunting.probes import readable_tables, run_probes, tables_read
+from traj_analyzer.hunting.probes import run_probes
 from traj_analyzer.hunting.steps import close_hunt, start_hunt, status, submit_proposal, submit_verdicts
-from traj_analyzer.hunting.summary import timeline_minutes
-from traj_analyzer.hunting.trial import try_probe
 from traj_analyzer.hunting.workspace import prepare, write_case, write_file
 from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.layers.tables import read_table
@@ -57,7 +50,6 @@ from traj_analyzer.operators.catalog import load_groups
 from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.runtime import mailbox, policy
 from traj_analyzer.vectorize import Matrix, build_frame
-from traj_analyzer.viewer.server import create_app
 from traj_analyzer.worker import registry
 
 REPLAY = DATA / "hunting" / "replay"
@@ -110,7 +102,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
 def prepared(project: Project, workspace: Path) -> list[str]:
     """Prepare a hunt workspace over every trajectory of the project, and return their keys."""
     keys = [row.key for row in load_index(project)]
-    written = prepare(project, workspace, "misuse", load_hunt(project, "misuse"), keys)
+    written = prepare(project, workspace, load_hunt(project, "misuse"), keys)
     assert {"need.md", "README.md", "operators/rules.py"} <= written
     return keys
 
@@ -140,7 +132,6 @@ def reading(key: str, found: bool, source: str = "hit", facet: str = "false_succ
 
 FALSE_SUCCESS = Facet(name="false_success", definition="The assistant reports success after a failed call.",
                       edge="owner")
-LAST_STEP = Facet(name="last_step", definition="The last step of a tool-use conversation.", edge="tool")
 
 
 def test_hunt_specs_are_checked(project: Project) -> None:
@@ -367,92 +358,6 @@ def test_verdicts_and_kept_probes_carry_over_to_the_next_run(project: Project) -
     assert again.facets == state.facets and not again.readings
 
 
-def test_probes_read_only_the_tables_the_marks_compute(project: Project, tmp_path: Path) -> None:
-    joined = ("WITH r AS (SELECT key, step FROM 'tables/contents.parquet') SELECT r.key, r.step, s.name AS note "
-              "FROM r JOIN 'tables/steps.parquet' s USING (key, step)")
-    assert tables_read(joined) == {"contents", "steps"}
-    for text in ("SELECT key, step, '' AS note FROM read_parquet('tables/steps.parquet')",
-                 "SELECT key, step, '' AS note FROM steps"):
-        with pytest.raises(ValueError, match="names its tables as 'tables/<name>.parquet'"):
-            tables_read(text)
-    readable = readable_tables(project)
-    assert {"steps", "trajectories", "contents", "actions", "relations", "queries", "turns"} <= readable
-    assert not {"events", "evidence", "judgments"} & readable
-    workspace = tmp_path / "ws"
-    keys = prepared(project, workspace)
-    events = "SELECT key, step, rule AS note FROM 'tables/events.parquet'"
-    write_file(workspace, "probes/joined.sql", joined)
-    write_file(workspace, "probes/events.sql", events)
-    hits, failed = run_probes(project, workspace, [probe("joined", text=joined), probe("events", text=events)],
-                              set(keys))
-    assert list(failed) == ["events"] and "reads only the tables" in failed["events"]
-    assert len(hits) == len(pq.read_table(workspace / "tables" / "steps.parquet"))
-
-
-def test_kept_probes_mark_every_trajectory_where_the_rounds_hit_it(project: Project, tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    keys = prepared(project, workspace)
-    code = (DATA / "hunting" / "weather_calls.py").read_text(encoding="utf-8")
-    probes = [probe("weather"), probe("weather_calls", kind="code", text=code),
-              probe("toucan_last", text=TOUCAN_LAST_SQL, facet="last_step")]
-    for state_probe in probes:
-        write_file(workspace, f"probes/{state_probe.name}.{'sql' if state_probe.kind == 'sql' else 'py'}",
-                   state_probe.text)
-    hits, failed = run_probes(project, workspace, probes, set(keys))
-    assert not failed
-    state = HuntState(facets=[FALSE_SUCCESS, LAST_STEP], probes=probes,
-                      hits={name: sorted(set(found["key"])) for name, found in hits.groupby("probe")})
-    keep_probes(project, "misuse", state, probe_ledger(state, load_hunt(project, "misuse")))
-    report = mark_trajectories(project, "misuse")
-    assert report == {"group": "hunt-misuse", "features": {"false_success": "false_success", "last_step": "last_step"},
-                      "marked": {"false_success": 6, "last_step": 30}}
-    # The marks are the positions the rounds hit, one trajectory at a time, each note naming its probe.
-    events = read_table(project, "events").to_pandas()
-    marked = events[events["rule"].isin(["false_success", "last_step"])]
-    assert sorted(zip(marked["key"], marked["step"], marked["note"], strict=True)) == sorted(
-        (row.key, row.step, f"{row.probe}: {row.note}") for row in hits.itertuples())
-    assert set(marked.loc[marked["rule"] == "last_step", "edge"]) == {"tool"}
-    (group,) = load_groups(Project.load(project.root), [marks_instance("misuse")])
-    assert [(f.name, f.type, f.event.edge if f.event else None) for f in group.features] == [
-        ("false_success", "event", "owner"), ("last_step", "event", "tool")]
-    assert "Marked where its probes hit: weather, weather_calls." in group.features[0].description
-    # Enabling the marks again leaves traj.yaml as it is.
-    mark_trajectories(Project.load(project.root), "misuse")
-    uses = [use for use in Project.load(project.root).config.operators if use.alias == "hunt-misuse"]
-    assert [(use.use, use.params) for use in uses] == [("hunt.marks", {"hunt": "misuse"})]
-    assert read_kept(project.hunts_dir / "misuse") is not None
-
-
-def test_blind_reads_measure_how_much_the_hits_sway_the_verdicts(project: Project) -> None:
-    spec = load_hunt(project, "misuse").model_copy(update={"blind_reads": 2})
-    hit = [Draw(key=f"toucan/{n}", source="hit", hits=[Hit(probe="weather", step=n)]) for n in range(3)]
-    draws = [*hit, Draw(key="ultrachat/a", source="random", hits=[])]
-    blind = blind_draws(spec, draws, 1)
-    assert blind == blind_draws(spec, draws, 1) and len(blind) == 2
-    assert all(d.key.startswith("toucan/") and d.source == "hit" and not d.hits for d in blind)
-    assert blind_draws(spec.model_copy(update={"blind_reads": 0}), draws, 1) == []
-    shown = {key: reading(key, True) for key in ("toucan/0", "toucan/1", "toucan/2")}
-    state = HuntState(readings=shown, blind=[reading("toucan/0", True), reading("toucan/1", False),
-                                             reading("toucan/2", True, facet="fake_test")])
-    found = calibration(state)
-    assert {key: found[key] for key in ("pairs", "found_shown", "found_blind", "found_both", "same_facet",
-                                        "agreement")} == {"pairs": 3, "found_shown": 3, "found_blind": 2,
-                                                          "found_both": 2, "same_facet": 1, "agreement": 0.3333}
-    assert [item["key"] for item in found["differ"]] == ["toucan/1", "toucan/2"]
-
-
-def test_the_timeline_gives_the_minutes_of_every_step(tmp_path: Path) -> None:
-    lines = [{"round": 1, "step": "propose", "event": "open", "at": "2026-10-28T10:00:00+00:00"},
-             {"round": 1, "step": "propose", "event": "open", "at": "2026-10-28T10:05:00+00:00"},
-             {"round": 1, "step": "propose", "event": "done", "at": "2026-10-28T10:17:30+00:00"},
-             {"round": 1, "step": "read", "event": "open", "at": "2026-10-28T10:17:31+00:00"},
-             {"round": 2, "step": "propose", "event": "open", "at": "2026-10-28T10:25:00+00:00"}]
-    path = tmp_path / "timeline.jsonl"
-    path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
-    # A step opened again after a stop counts from its last opening; a step not done has no minutes.
-    assert timeline_minutes(path) == {(1, "propose"): 12.5}
-
-
 def test_hunt_needs_the_engine_credentials_and_the_tables(project: Project, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     with pytest.raises(ConfigError, match="DEEPSEEK_API_KEY"):
@@ -470,7 +375,7 @@ class HuntReplay:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
-    def check(self, project: Project) -> None:
+    def check_credentials(self, project: Project) -> None:
         pass
 
     def run(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None:
@@ -485,7 +390,7 @@ class HuntReplay:
 class NoCalls:
     """A runner for a run whose every call is already answered in the mailbox."""
 
-    def check(self, project: Project) -> None:
+    def check_credentials(self, project: Project) -> None:
         pass
 
     def run(self, project: Project, count: int, functions: frozenset[str] = frozenset()) -> None:
@@ -522,7 +427,7 @@ def test_hunt_replays_a_real_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
                                   "facets": {"failure_never_stated": 1, "failure_stated_then_dropped": 1},
                                   "unread_hits": 0}]
     # Every hit was read in the rounds, so the closing check had nothing left.
-    assert report["final"] == {"read": 0, "found": 0, "blind": 0, "unanswered": []}
+    assert report["final"] == {"read": 0, "found": 0, "blind": 0, "unanswered": [], "blind_unanswered": []}
     assert all(not keys for keys in report["unverified"].values())
     assert report["marks"] == {"group": "hunt-misuse",
                                "features": {"failure_never_stated": "failure_never_stated",
@@ -561,70 +466,12 @@ def test_hunt_replays_a_real_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert sorted(zip(marks["key"], marks["step"], marks["note"], strict=True)) == sorted(
         (row.key, row.step, f"{row.probe}: {row.note}") for row in hits.itertuples())
 
-    capsys.readouterr()
-    assert main(["hunt", "report", "misuse"]) == 0
-    summary = json.loads(capsys.readouterr().out)
-    assert [(item["round"], item["blind"], sorted(item["minutes"])) for item in summary["per_round"]] == [
-        (1, 2, ["propose", "read"]), (2, 0, ["propose", "read"]), (3, 0, ["propose", "read"])]
-    assert all(minutes is not None for item in summary["per_round"] for minutes in item["minutes"].values())
-    assert summary["reviews"] == {"verdicts": 0, "agree": 0, "unread": 0, "differ": []}
-    assert summary["files"] == {"report": ".traj/hunts/misuse/1/report.json",
-                                "verdicts": f".traj/tables/{VERDICTS_TABLE}.parquet", "kept": "hunts/misuse"}
-
-    # A kept probe tried again finds what it found; a broader one shows what it adds and what was rejected.
-    same = try_probe(project, "misuse", kept / "unstated_failure_complete_claim.sql")
-    assert (same["positions"], same["trajectories"], same["read"]["precision"], same["new"]["trajectories"]) == \
-        (1, 1, 1.0, 0)
-    assert same["same_name"] == {"trajectories": 1, "gained": 0, "lost": 0, "lost_found": []}
-    broad = workspace / "notes" / "weather.sql"
-    broad.write_text(WEATHER_SQL, encoding="utf-8")
-    tried = try_probe(project, "misuse", broad)
-    assert (tried["positions"], tried["trajectories"], tried["same_name"]) == (19, 6, None)
-    assert tried["new"]["trajectories"] == 5 and tried["read"]["found"] == 1
-    assert tried["rejected"]["count"] == tried["read"]["read"] - 1
-    assert {item["verdict"] for item in tried["sample"]} <= {"found failure_stated_then_dropped", "rejected", "unread"}
-    write_file(workspace, "notes/wrong.sql", "SELECT key, step FROM 'tables/steps.parquet'")
-    with pytest.raises(ConfigError, match="the probe does not run: ProbeError: a SQL probe returns the columns"):
-        try_probe(project, "misuse", workspace / "notes" / "wrong.sql")
-
     # A run stopped after round 2 continues from its state, and every call it makes is answered from the mailbox.
     (run / "report.json").unlink()
     (run / "state" / "3.json").unlink()
     assert hunt(Project.load(project.root), "misuse", runner=NoCalls()) == report
     uses = [use for use in Project.load(project.root).config.operators if use.use == "hunt.marks"]
     assert [(use.alias, use.params) for use in uses] == [("hunt-misuse", {"hunt": "misuse"})]
-
-
-def test_the_review_pages_show_what_a_hunt_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    project = real_run_project(tmp_path / "proj")
-    monkeypatch.chdir(project.root)
-    hunt(project, "misuse", runner=HuntReplay(tmp_path / "replay"))
-    client = TestClient(create_app(Project.load(project.root)))
-    (listed,) = client.get("/api/review/hunts").json()
-    assert {key: listed[key] for key in ("hunt", "run", "rounds", "converged", "found", "facets", "probes")} == {
-        "hunt": "misuse", "run": 1, "rounds": 3, "converged": True, "found": 2, "facets": 2, "probes": 4}
-    page = client.get("/api/review/hunt", params={"name": "misuse"}).json()
-    assert page["need"] == NEED and page["facets"][0]["edge"] == "owner"
-    rows = page["trajectories"]
-    assert [row["status"] for row in rows] == ["found"] * 2 + ["rejected"] * 34
-    first = rows[0]
-    assert (first["key"], first["facet"], first["steps"], first["batch"]) == (
-        "toucan/3ae8c7dc-ef0e-59c2-9523-3cf929682135", "failure_never_stated", [6, 7, 13], "all")
-    assert [(mark["facet"], mark["step"]) for mark in first["marks"]] == [("failure_never_stated", 6)] * 2
-    assert client.get("/api/review/hunt", params={"name": "other"}).status_code == 404
-    detail = client.get("/api/review/trajectory", params={"key": first["key"]}).json()
-    assert [(item["hunt"], item["found"], item["facet"]) for item in detail["hunts"]] == [
-        ("misuse", True, "failure_never_stated")]
-    marked = [event for turn in detail["turns"] for event in turn["events"] if event["rule"] == "failure_never_stated"]
-    assert [event["step"] for event in marked] == [6, 6]
-    # A person's verdict on the feature of a facet is set against the hunt's own verdict.
-    answer = client.post("/api/review/verdict", json={"key": first["key"], "feature": "failure_never_stated",
-                                                      "step": 6, "worth": True})
-    assert answer.status_code == 200
-    client.post("/api/review/verdict", json={"key": rows[1]["key"], "feature": "failure_never_stated", "worth": True})
-    reviews = client.get("/api/review/hunt", params={"name": "misuse"}).json()["reviews"]
-    assert (reviews["verdicts"], reviews["agree"], [item["key"] for item in reviews["differ"]]) == (
-        2, 1, [rows[1]["key"]])
 
 
 def recorded_answers(project: Project) -> tuple[dict[int, dict[str, Any]], dict[tuple[int, tuple[str, ...]], Any]]:

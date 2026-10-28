@@ -121,7 +121,8 @@ Built-in adapters live in `traj_analyzer/adapters/` of the package, project adap
 In `traj.yaml`, `datasets` gives each dataset its adapter name, input globs, exclude globs, adapter options and a description; an adapter from an installed package is named as `module:Class`.
 `traj adapters list` shows every adapter and the datasets that use it.
 An adapter whose source records the calls of the agent apart from the conversation, such as a proxy that logs every response, gives their tools as `recorded_calls`.
-`traj ingest` checks that the steps of every such trajectory hold a `tool_call` of each recorded call, counted by tool, and stops with an error listing the trajectories that lack some, before it writes the index of the dataset; so a parser that loses calls is found when the data is read.
+`traj ingest` stops at the first trajectory whose `tool_call` steps lack one of them, counted by tool, before anything of that dataset is written, so a parser that loses a call is found when the data is read.
+The recorded calls can be a part of the agent's calls, where the source reports one form of call and not another: the ATR recorder of the cgfs project reports the function calls of a response and not a call the model sends as a custom tool call, which the adapter parses from the body. So a parsed call the source does not report is no error.
 
 The built-in `claude_code` adapter reads Claude Code session files.
 It reads `user` and `assistant` records in file order, so turns abandoned by a rewind stay in the trajectory.
@@ -453,15 +454,17 @@ A model behind an OpenAI-compatible endpoint is reached through a patch on the `
 The matching `engine` configuration is `provider: litellm`, `model: DeepSeek-V4-flash`, `env_passthrough: [LITELLM_API_KEY, LITELLM_BASE_URL]` and `patches: [engine/litellm.patch.yml]`.
 Endpoints and keys arrive through environment variables and are never written into project files.
 
-Every command that starts workers checks first that they can run calls, and `traj check` runs the same check alone:
+Every command that starts workers checks first that they can run calls, once per project in one process, and `traj check` runs the same check alone:
 
 1. every variable of `engine.env_passthrough` is set, and every file of `engine.patches` exists;
 2. the dsh runtime under `dsh_home` has the version aifn requires, and the `sdk` profile holds a copy of the aifn bundle equal to the one aifn ships;
 3. one call of the function `traj-check`, with the access a call that writes to its workspace gets, runs `sha256sum token.txt` with the shell tool on a file of random content, and returns what it printed.
 
-The command stops with an error at the first item that fails, naming what to install or set.
+The command stops with a configuration error at the first item that fails, naming what to install or set.
 The third item reaches the endpoint with the key and the model of `engine`, and it finds a sandbox that refuses every command: such a sandbox does not make a call fail, the model goes on without the shell, and only the digest, which the model cannot give without running the command, shows that the shell ran.
 A call that only reads its workspace has no shell tool at all.
+The check gets a directory of its own under `.traj/check/`, with the token it reads and the mailbox the call is issued to inside it, and the directory goes when the check ends: two commands of one project never read each other's token, answer each other's call, or leave a request behind in the project's mailbox.
+A worker takes the mailbox of `TRAJ_MAILBOX` when the run that starts it sets one, as the check does, and the project's mailbox otherwise.
 
 ## 6. Sampling
 
@@ -1158,7 +1161,7 @@ The probes a finished run keeps then mark every trajectory of the project, so a 
 | `min_reads_per_probe` | 3 | reads every active probe with unread hits gets before the rest of the hit reads is shared out |
 | `cases_per_call` | 6 | trajectories one `hunt-verify` call reads |
 | `blind_reads` | 6 | hit reads of a round that other readers read once more without the hits (section 18.4) |
-| `workers` | one per call of the round | aifn workers that read side by side |
+| `workers` | `extract.workers` | aifn workers that read side by side, never more than the calls left |
 | `clusters` | 40 | clusters of the trajectories the coverage reads go through |
 | `probes_max` | 20 | most active probes |
 | `min_precision` | 0.5 | precision below which the ledger asks for a probe to be revised |
@@ -1180,7 +1183,8 @@ A probe is a mechanical search that finds positions, a trajectory and a step, fo
 
 A SQL probe reads only the tables the marks compute for one trajectory: `steps`, `trajectories`, `contents` and the tables of the parsing layers.
 It names each as `'tables/<name>.parquet'`, which sqlglot finds in the query, and never through a table function such as `read_parquet`.
-What a probe finds in a trajectory depends only on the rows of that trajectory, because the marks run it on one trajectory at a time.
+What a probe finds in a trajectory depends only on the rows of that trajectory, because the marks run it on one trajectory at a time; section 18.7 says how a probe that breaks this is caught.
+Both kinds of probe read a trajectory with the metadata `render.hide_metadata` names left out, as every model does.
 A probe may match words and patterns in what a user, a model or a tool wrote, because every trajectory it hits is checked by reading.
 A probe whose query fails, reads another table, returns other columns, more than one statement or a key of no trajectory of the hunt, or whose operator file fails or has another output, is `failed` for the round, with the error in the ledger.
 
@@ -1211,7 +1215,8 @@ The other half are random reads, drawn uniformly from the unread trajectories no
 
 A reader of a trajectory a probe hit sees where it hit, which may sway the verdict toward the probe.
 So `blind_reads` of the hit reads of a round, drawn at random, are read once more by other readers, in groups of their own, as trajectories no probe hits are: the request names the file and gives no hits.
-A blind verdict counts toward no probe and no finding, and a facet it reports as new joins no facet list; `blind.json` of the round holds the blind verdicts, and the report sets each against the verdict with the hits (section 18.6).
+A blind verdict counts toward no probe and no finding, and a facet it reports as new joins no facet list, so a blind verdict naming a facet the list lacks gets no verdict of its own; `blind.json` of the round holds the blind verdicts, the round's record counts those left without one apart from the reads it keeps, and the report sets each against the verdict with the hits (section 18.6).
+The ledger the next proposal reads leaves the blind reads that got no verdict out: the blind reads measure the readers, and nothing about them tells a proposal which probe to tighten.
 
 ### 18.5 Ledger and the end of the search
 
@@ -1253,6 +1258,8 @@ It runs every SQL probe over the tables of one trajectory, registered under thei
 The layers the probes read are enabled with it.
 A trajectory of a dataset the hunt does not search has no value.
 The marks need no model, so every `traj extract` computes them on new trajectories too, and a run that keeps other probes changes them.
+A probe finds its positions over every trajectory of the hunt at once in a round, and over one trajectory at a time in the marks, so a probe whose result depends on the other trajectories, such as one comparing a step with an average over the batch, would mark positions no round ever read.
+The last step of the run compares the marks of the trajectories of the hunt with the positions of `rounds/<round>/hits.parquet`: a run whose marks differ stops with the probes named, writes no report, and leaves `hunt-<name>` out of `traj.yaml`, so no later `traj extract` computes marks nobody validated.
 The marks are events like those of section 15: the trajectory list narrows by them, the course of a trajectory shows them at their steps, `traj anomalies` compares their rates between batches, and a person records a verdict on the feature of a facet with `traj review` or on the trajectory page.
 `report.json` names the group, the facet of every feature, and how many trajectories each feature marks.
 
@@ -1322,6 +1329,7 @@ The page of a trajectory shows the verdict of every hunt that read it, with its 
 - One model gives every verdict, and a trajectory read once is not read again in the run, so a verdict given before a facet existed stays as it was.
 - The miss bound covers the trajectories no probe hits; a real trajectory among the hits of a probe is counted by the probe's precision, which rests on the hits read.
 - Probes run in the project's environment without isolation; during the rounds a SQL probe is one `SELECT` that names only the readable tables, and a code probe can run any code.
+- The call that proposes probes writes to its workspace, so it has a shell, and the dsh sandbox modes govern writes alone: its shell can read any file the process can, including the tables of `.traj/` where the metadata of `render.hide_metadata` is not left out. What a proposal reads through the workspace is restricted, and what its shell reads is not.
 - The clusters and the diversity of the hit reads rest on the extracted features, so `traj extract` runs before a hunt.
 - The blind reads measure how much the hits sway the readers; they say nothing of what both readers miss.
 

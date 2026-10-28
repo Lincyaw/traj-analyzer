@@ -8,13 +8,13 @@ from pathlib import Path
 from aifn import Call, Mailbox, Registry, Worker
 from aifn.engines import DeepSeekEngine
 
-from traj_analyzer.extract import FUNCTIONS_VARIABLE
+from traj_analyzer.extract import FUNCTIONS_VARIABLE, MAILBOX_VARIABLE
 from traj_analyzer.hunting.functions import functions as hunting_functions
 from traj_analyzer.mining import functions as mining_functions
 from traj_analyzer.operators.catalog import runtime_groups
-from traj_analyzer.preflight import check_function
-from traj_analyzer.project import ConfigError, Project
-from traj_analyzer.runtime import build_function, engine_env, policy
+from traj_analyzer.preflight import build_check_function
+from traj_analyzer.project import Project
+from traj_analyzer.runtime import build_function, engine_env, patch_files, policy
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +38,7 @@ def registry(project: Project) -> Registry:
     check that a worker can run a call."""
     functions = dict(mining_functions.functions(project))
     functions.update(hunting_functions(project))
-    check = check_function(project)
+    check = build_check_function(project)
     functions[check.name] = check
     for group in runtime_groups(project):
         if group.is_code:
@@ -53,23 +53,21 @@ def registry(project: Project) -> Registry:
 def make_worker(worker_id: str) -> Worker:
     """Factory for `python -m aifn worker traj_analyzer.worker:make_worker`.
 
-    `TRAJ_FUNCTIONS`, when set by the run that starts the worker, names the functions it takes calls of.
+    `TRAJ_FUNCTIONS`, when set by the run that starts the worker, names the functions it takes calls of, and
+    `TRAJ_MAILBOX` the mailbox it works from, which the check of `traj check` gives a directory of its own.
     """
     project = Project.find()
     config = project.config.engine
-    patches = tuple((project.root / Path(p).expanduser()).resolve() for p in config.patches)
-    missing = [str(p) for p in patches if not p.is_file()]
-    if missing:
-        raise ConfigError(f"engine.patches files do not exist: {missing}")
     functions = registry(project)
     taken = frozenset(functions.functions)
     if os.environ.get(FUNCTIONS_VARIABLE):
         taken &= frozenset(os.environ[FUNCTIONS_VARIABLE].split(","))
+    root = Path(os.environ[MAILBOX_VARIABLE]) if os.environ.get(MAILBOX_VARIABLE) else project.mailbox_dir
     return Worker(
-        mailbox=WorkerMailbox(root=project.mailbox_dir, functions=taken),
+        mailbox=WorkerMailbox(root=root, functions=taken),
         registry=functions,
         engine=DeepSeekEngine(dsh_home=Path(config.dsh_home).expanduser(), env=engine_env(project),
-                              patches=patches),
+                              patches=patch_files(project)),
         policy=policy(project),
         id=worker_id,
     )
