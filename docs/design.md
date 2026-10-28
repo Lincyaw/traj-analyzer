@@ -128,6 +128,13 @@ An adapter whose source records the calls of the agent apart from the conversati
 `traj ingest` stops at the first trajectory whose `tool_call` steps lack one of them, counted by tool, before anything of that dataset is written, so a parser that loses a call is found when the data is read.
 The recorded calls can be a part of the agent's calls, where the source reports one form of call and not another: the ATR recorder of the cgfs project reports the function calls of a response and not a call the model sends as a custom tool call, which the adapter parses from the body. So a parsed call the source does not report is no error.
 
+The built-in `atif` adapter reads a trajectory in the Agent Trajectory Interchange Format, one file holding one trajectory.
+An ATIF step is a turn, so each one becomes the steps of that turn in the order the turn holds them: the reasoning, the message, the tool calls, and the results of those calls, which the format requires on the step whose calls they answer.
+Every step of one turn carries that turn's `step_id` as `source_step`.
+`path_metadata` searches a regular expression in the path of the file and makes its named groups metadata; `harness_key` and `harnesses` name the harness; `notices` are patterns of user text the harness inserts, and with `single_prompt` every user message after the agent has answered is a notice too, since the person wrote only what the agent was given before it acted.
+With `subagents`, a subagent trajectory the document embeds is read as a trajectory of its own, identified by its `trajectory_id`.
+The format names media by path or URL and carries no text of it, so a media content part becomes a placeholder.
+
 The built-in `claude_code` adapter reads Claude Code session files.
 It reads `user` and `assistant` records in file order, so turns abandoned by a rewind stay in the trajectory.
 It names the harness `claude_code`, and the text Claude Code records when the user interrupts the assistant becomes a notice step named `interruption`.
