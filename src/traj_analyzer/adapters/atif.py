@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterator
@@ -122,6 +123,8 @@ class AtifAdapter:
     the harness profiles. `notices` are patterns of user text the harness inserts; with `single_prompt`, every
     user message after the agent has answered is such a notice too, since the person wrote only what the agent
     was given before it acted.
+    A trajectory that several input files hold is read once, from the first of them; its copies must hold the
+    same document.
     """
 
     def __init__(
@@ -142,14 +145,26 @@ class AtifAdapter:
         self.include_thinking = include_thinking
         self.subagents = subagents
         """Whether an embedded subagent trajectory is read as a trajectory of its own."""
+        self.read_so_far: dict[str, tuple[Path, str]] = {}
+        """The trajectories read so far, by id, with their first file and the digest of its document; an archive
+        can hold a run another archive holds too."""
 
     def read(self, path: Path, dataset: str) -> Iterator[Trajectory]:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        document = json.loads(raw)
         version = document["schema_version"]
         if version not in VERSIONS:
             raise ValueError(f"{path} declares the trajectory format {version!r}, and this adapter reads "
                              f"{sorted(VERSIONS)}")
-        yield self._trajectory(path, dataset, document, path.parent.name)
+        identity = path.parent.name
+        digest = hashlib.sha256(raw).hexdigest()
+        if identity in self.read_so_far:
+            first, seen = self.read_so_far[identity]
+            if seen != digest:
+                raise ValueError(f"{path} holds the trajectory of {first} with another document")
+            return
+        self.read_so_far[identity] = (path, digest)
+        yield self._trajectory(path, dataset, document, identity)
         if not self.subagents:
             return
         for embedded in document.get("subagent_trajectories") or []:
