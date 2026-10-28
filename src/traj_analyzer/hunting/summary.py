@@ -74,12 +74,21 @@ def review_agreement(project: Project, name: str, features: dict[str, str]) -> d
     return {"verdicts": len(latest), "agree": agree, "unread": unread, "differ": differ}
 
 
+def _missing_fields(report: dict[str, Any]) -> list[str]:
+    """The fields this command reads that a report written by an earlier version of the hunt lacks."""
+    missing = sorted({"calibration", "batches", "marks"} - set(report))
+    missing += [f"final.{name}" for name in sorted({"blind", "blind_unanswered"} - set(report["final"]))]
+    missing += [f"per_round.{name}" for record in report["per_round"][:1]
+                for name in sorted({"blind", "blind_unanswered"} - set(record))]
+    return missing
+
+
 def summarize_run(project: Project, name: str, run: int | None = None) -> dict[str, Any]:
     """What a finished run of the hunt found, in brief: the rounds with their reads and minutes, the facets, the
     batches, the active probes, the coverage, how blind reads and people's verdicts agree, and where the files are."""
     directory = finished_run(project, name, run)
     report = json.loads((directory / REPORT).read_text(encoding="utf-8"))
-    missing = sorted({"calibration", "batches", "marks"} - set(report))
+    missing = _missing_fields(report)
     if missing:
         raise ConfigError(f"{directory / REPORT} lacks {missing}, so it was written by an earlier version of the "
                           f"hunt; run `traj hunt run {name}` again for a report this command can read")
