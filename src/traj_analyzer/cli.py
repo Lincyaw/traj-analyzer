@@ -19,7 +19,7 @@ from traj_analyzer.extract import SubprocessWorkers, coverage, extract
 from traj_analyzer.files import parse_yaml
 from traj_analyzer.hunting import hunt
 from traj_analyzer.hunting.steps import close_hunt, start_hunt, status, submit_proposal, submit_verdicts
-from traj_analyzer.hunting.summary import summary
+from traj_analyzer.hunting.summary import summarize_run
 from traj_analyzer.hunting.trial import try_probe
 from traj_analyzer.ingest import ingest, load_index
 from traj_analyzer.labels import labels_report
@@ -418,7 +418,7 @@ def cmd_hunt_report(
 ) -> None:
     """What a finished run found, in brief: rounds with their minutes, facets, batches, probes, coverage, how blind
     reads and people's verdicts agree, the marks, and where the files are."""
-    _emit(summary(Project.find(), name, run))
+    _emit(summarize_run(Project.find(), name, run))
 
 
 @app.command("try")

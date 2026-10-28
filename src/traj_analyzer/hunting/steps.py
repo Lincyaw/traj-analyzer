@@ -21,7 +21,7 @@ from traj_analyzer.hunting.driver import (
     end_round,
     finish,
     last_run,
-    note,
+    note_step,
     open_hunt,
     over,
     propose_request,
@@ -108,7 +108,7 @@ def open_proposal(hunt: Hunt, state: HuntState) -> None:
     write_file(hunt.workspace, f"{base}/proposal.schema.json", schema)
     write_file(hunt.workspace, f"{base}/propose.md", propose_instruction(hunt.spec, number, f"{base}/input.json")
                + answer_section(f"{base}/proposal.json", f"{base}/proposal.schema.json"))
-    note(hunt, number, "propose", "open")
+    note_step(hunt, number, "propose", "open")
 
 
 def submit_proposal(project: Project, name: str) -> dict[str, Any]:
@@ -125,7 +125,7 @@ def submit_proposal(project: Project, name: str) -> dict[str, Any]:
         raise ConfigError(f"{path} does not exist; write the proposal there, as {_base(number, False)}/propose.md "
                           f"says")
     proposal = _parse(proposal_model(hunt.spec.probes_max), path)
-    note(hunt, number, "propose", "done")
+    note_step(hunt, number, "propose", "done")
     failed, retired, draws = begin_round(hunt, state, proposal, number)
     open_verdicts(hunt, number, False, state, draws, failed, sorted(retired))
     return status(project, name)
@@ -141,7 +141,7 @@ def open_verdicts(
     answers = hunt.workspace / base / "answers"
     if answers.is_dir():
         shutil.rmtree(answers)
-    note(hunt, number, "close" if final else "read", "open")
+    note_step(hunt, number, "close" if final else "read", "open")
     reads = write_reads(hunt, draws, base, number)
     schema = f"{base}/verify.schema.json"
     write_file(hunt.workspace, schema, json.dumps(Verification.model_json_schema(), indent=1))
@@ -190,7 +190,7 @@ def submit_verdicts(project: Project, name: str) -> dict[str, Any]:
                               f"is `{NEW}` with `new_facet`")
         (blind if batch.blind else answers).append((batch.cases, verdicts, "the answer gave no verdict for it"))
     readings, blind_readings, unanswered = record(pending.state, pending.reads, answers, blind, pending.round)
-    note(hunt, pending.round, "close" if pending.final else "read", "done")
+    note_step(hunt, pending.round, "close" if pending.final else "read", "done")
     if pending.final:
         finish(hunt, pending.state, readings, blind_readings, unanswered)
         path.unlink()

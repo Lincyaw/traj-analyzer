@@ -62,9 +62,10 @@ def try_probe(project: Project, name: str, file: Path) -> dict[str, Any]:
         "misses": [{"key": reading.key, "facet": reading.facet, "steps": reading.steps}
                    for reading in readings.values() if reading.found and not reading.hits and reading.key in steps],
         "new": {"trajectories": len(new), "unread": sum(key not in readings for key in new),
-                "listed": [{"key": key, "steps": steps[key], "verdict": _verdict(state, key)} for key in new[:LISTED]]},
+                "listed": [{"key": key, "steps": steps[key], "verdict": _verdict_of(state, key)}
+                           for key in new[:LISTED]]},
         "same_name": None,
-        "sample": [{"key": row.key, "step": int(row.step), "note": row.note, "verdict": _verdict(state, row.key)}
+        "sample": [{"key": row.key, "step": int(row.step), "note": row.note, "verdict": _verdict_of(state, row.key)}
                    for row in found.drop_duplicates("key").head(SAMPLE).itertuples()],
     }
     if probe in set(last["probe"]):
@@ -84,7 +85,7 @@ def _last_hits(workspace: Path) -> pd.DataFrame:
     return pq.read_table(workspace / "rounds" / str(rounds[0]) / "hits.parquet").to_pandas()
 
 
-def _verdict(state: HuntState, key: str) -> str:
+def _verdict_of(state: HuntState, key: str) -> str:
     reading = state.readings.get(key)
     if reading is None:
         return "unread"

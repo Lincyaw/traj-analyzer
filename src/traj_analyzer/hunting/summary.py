@@ -38,7 +38,7 @@ def finished_run(project: Project, name: str, run: int | None) -> Path:
     return root / str(finished[-1])
 
 
-def durations(path: Path) -> dict[tuple[int, str], float]:
+def timeline_minutes(path: Path) -> dict[tuple[int, str], float]:
     """Minutes from the opening of every step of a run to its end, by round and step; a step opened again after a
     stop counts from its last opening."""
     opened: dict[tuple[int, str], datetime] = {}
@@ -56,7 +56,7 @@ def durations(path: Path) -> dict[tuple[int, str], float]:
     return minutes
 
 
-def reviews(project: Project, name: str, features: dict[str, str]) -> dict[str, Any]:
+def review_agreement(project: Project, name: str, features: dict[str, str]) -> dict[str, Any]:
     """How the verdicts people gave on the marks of the hunt agree with the hunt's own verdicts: a person who found a
     trajectory worth a look for the feature of a facet agrees with a hunt verdict that found that facet in it."""
     path = table_path(project, VERDICTS_TABLE)
@@ -81,12 +81,12 @@ def reviews(project: Project, name: str, features: dict[str, str]) -> dict[str, 
     return {"verdicts": len(latest), "agree": agree, "unread": unread, "differ": differ}
 
 
-def summary(project: Project, name: str, run: int | None = None) -> dict[str, Any]:
+def summarize_run(project: Project, name: str, run: int | None = None) -> dict[str, Any]:
     """What a finished run of the hunt found, in brief: the rounds with their reads and minutes, the facets, the
     batches, the active probes, the coverage, how blind reads and people's verdicts agree, and where the files are."""
     directory = finished_run(project, name, run)
     report = json.loads((directory / REPORT).read_text(encoding="utf-8"))
-    minutes = durations(directory / TIMELINE)
+    minutes = timeline_minutes(directory / TIMELINE)
     rounds = [{"round": record["round"], "reads": record["reads"], "blind": record["blind"],
                "found": record["found"], "new": len(record["new"]), "unanswered": len(record["unanswered"]),
                "minutes": {step: minutes.get((record["round"], step)) for step in ("propose", "read")}}
@@ -109,7 +109,7 @@ def summary(project: Project, name: str, run: int | None = None) -> dict[str, An
         "coverage": report["coverage"],
         "calibration": {**{key: value for key, value in calibration.items() if key != "differ"},
                         "differ": [item["key"] for item in calibration["differ"]][:LISTED]},
-        "reviews": reviews(project, name, report["marks"]["features"]),
+        "reviews": review_agreement(project, name, report["marks"]["features"]),
         "unverified": {probe: len(keys) for probe, keys in report["unverified"].items()},
         "marks": report["marks"],
         "files": {"report": str((directory / REPORT).relative_to(project.root)),

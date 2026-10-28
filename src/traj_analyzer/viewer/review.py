@@ -19,7 +19,7 @@ from traj_analyzer.evaluation import Card, load_evaluation
 from traj_analyzer.features.table import KEY
 from traj_analyzer.hunting import VERDICTS_TABLE, load_hunt
 from traj_analyzer.hunting.spec import hunt_names
-from traj_analyzer.hunting.summary import finished_runs, summary
+from traj_analyzer.hunting.summary import finished_runs, summarize_run
 from traj_analyzer.ingest import load_index
 from traj_analyzer.labels import TOP_SHARE
 from traj_analyzer.operators.base import FeatureSpec
@@ -672,7 +672,7 @@ class Review:
             if not finished_runs(self.project, name):
                 out.append({"hunt": name, "need": need, "run": None})
                 continue
-            found = summary(self.project, name)
+            found = summarize_run(self.project, name)
             out.append({key: found[key] for key in ("hunt", "run", "rounds", "converged", "found", "coverage")}
                        | {"need": need, "facets": len(found["facets"]), "probes": len(found["probes"])})
         return out
@@ -685,7 +685,7 @@ class Review:
         need = load_hunt(self.project, name).need.strip()
         if not finished_runs(self.project, name):
             return {"hunt": name, "need": need, "run": None, "trajectories": []}
-        found = summary(self.project, name)
+        found = summarize_run(self.project, name)
         facets = found["marks"]["features"]
         rows: dict[str, dict[str, Any]] = {}
         if self._has(VERDICTS_TABLE):

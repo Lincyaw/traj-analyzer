@@ -34,7 +34,7 @@ from traj_analyzer.hunting.functions import (
     functions,
     proposal_model,
 )
-from traj_analyzer.hunting.kept import instance_name, read_kept
+from traj_analyzer.hunting.kept import read_kept
 from traj_analyzer.hunting.ledger import (
     HuntState,
     ProbeState,
@@ -45,9 +45,10 @@ from traj_analyzer.hunting.ledger import (
     probe_ledger,
     unproductive,
 )
+from traj_analyzer.hunting.marks import marks_instance
 from traj_analyzer.hunting.probes import readable_tables, run_probes, tables_read
 from traj_analyzer.hunting.steps import close_hunt, start_hunt, status, submit_proposal, submit_verdicts
-from traj_analyzer.hunting.summary import durations
+from traj_analyzer.hunting.summary import timeline_minutes
 from traj_analyzer.hunting.trial import try_probe
 from traj_analyzer.hunting.workspace import prepare, write_case, write_file
 from traj_analyzer.ingest import ingest, load_index
@@ -411,7 +412,7 @@ def test_kept_probes_mark_every_trajectory_where_the_rounds_hit_it(project: Proj
     assert sorted(zip(marked["key"], marked["step"], marked["note"], strict=True)) == sorted(
         (row.key, row.step, f"{row.probe}: {row.note}") for row in hits.itertuples())
     assert set(marked.loc[marked["rule"] == "last_step", "edge"]) == {"tool"}
-    (group,) = load_groups(Project.load(project.root), [instance_name("misuse")])
+    (group,) = load_groups(Project.load(project.root), [marks_instance("misuse")])
     assert [(f.name, f.type, f.event.edge if f.event else None) for f in group.features] == [
         ("false_success", "event", "owner"), ("last_step", "event", "tool")]
     assert "Marked where its probes hit: weather, weather_calls." in group.features[0].description
@@ -449,7 +450,7 @@ def test_the_timeline_gives_the_minutes_of_every_step(tmp_path: Path) -> None:
     path = tmp_path / "timeline.jsonl"
     path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
     # A step opened again after a stop counts from its last opening; a step not done has no minutes.
-    assert durations(path) == {(1, "propose"): 12.5}
+    assert timeline_minutes(path) == {(1, "propose"): 12.5}
 
 
 def test_hunt_needs_the_engine_credentials_and_the_tables(project: Project, monkeypatch: pytest.MonkeyPatch) -> None:

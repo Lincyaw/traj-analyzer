@@ -38,7 +38,7 @@ from traj_analyzer.hunting.functions import (
     hunt_functions,
     propose_instruction,
 )
-from traj_analyzer.hunting.kept import OPERATOR, Kept, KeptProbe, instance_name, read_kept, write_kept
+from traj_analyzer.hunting.kept import Kept, KeptProbe, read_kept, write_kept
 from traj_analyzer.hunting.ledger import (
     HuntState,
     ProbeState,
@@ -51,6 +51,7 @@ from traj_analyzer.hunting.ledger import (
     probe_ledger,
     unproductive,
 )
+from traj_analyzer.hunting.marks import OPERATOR, marks_instance
 from traj_analyzer.hunting.probes import HITS_SCHEMA, probe_path, run_probes
 from traj_analyzer.hunting.spec import HuntSpec, hunt_model, load_hunt
 from traj_analyzer.hunting.workspace import prepare, write_case, write_file
@@ -181,10 +182,10 @@ def hunt(
     draws = closing_draws(found, state)
     if not draws:
         return finish(found, state, [], [], [])
-    note(found, state.round + 1, "close", "open")
+    note_step(found, state.round + 1, "close", "open")
     reads = write_reads(found, draws, f"rounds/{FINAL}", state.round + 1)
     readings, blind, unanswered = ask_verdicts(found, calls, state, reads, state.round + 1)
-    note(found, state.round + 1, "close", "done")
+    note_step(found, state.round + 1, "close", "done")
     return finish(found, state, readings, blind, unanswered)
 
 
@@ -246,7 +247,7 @@ def save_state(hunt: Hunt, state: HuntState) -> None:
     (hunt.directory / STATE / f"{state.round}.json").write_text(state.model_dump_json(indent=1), encoding="utf-8")
 
 
-def note(hunt: Hunt, number: int, step: Step, event: Literal["open", "done"]) -> None:
+def note_step(hunt: Hunt, number: int, step: Step, event: Literal["open", "done"]) -> None:
     """Record in the timeline of the run that a step of a round was opened or done."""
     line = {"round": number, "step": step, "event": event, "at": datetime.now(UTC).isoformat(timespec="seconds")}
     with (hunt.directory / TIMELINE).open("a", encoding="utf-8") as out:
@@ -277,16 +278,16 @@ def run_round(hunt: Hunt, calls: WorkspaceCalls, state: HuntState) -> HuntState:
     write_state(hunt, state)
     request = propose_request(hunt, number)
     leftovers = [hunt.workspace / "notes" / f"{PROPOSE}-{number}.md", *calls.unplaced("operators")]
-    note(hunt, number, "propose", "open")
+    note_step(hunt, number, "propose", "open")
     proposal = calls.alone(function_name(PROPOSE, hunt.name), propose_instruction(hunt.spec, number), request,
                            leftovers)
     write_file(hunt.workspace, f"rounds/{number}/proposal.json", proposal.model_dump_json(indent=1))
-    note(hunt, number, "propose", "done")
+    note_step(hunt, number, "propose", "done")
     failed, retired, draws = begin_round(hunt, state, proposal, number)
-    note(hunt, number, "read", "open")
+    note_step(hunt, number, "read", "open")
     reads = write_reads(hunt, draws, f"rounds/{number}", number)
     readings, blind, unanswered = ask_verdicts(hunt, calls, state, reads, number)
-    note(hunt, number, "read", "done")
+    note_step(hunt, number, "read", "done")
     return end_round(hunt, state, number, readings, blind, unanswered, failed, sorted(retired))
 
 
@@ -460,7 +461,7 @@ def write_state(hunt: Hunt, state: HuntState) -> None:
         {**probe.model_dump(mode="json", exclude={"text"}),
          "file": str(probe_path(workspace, probe).relative_to(workspace))} for probe in state.probes]))
     active = {probe_path(workspace, probe).name: probe for probe in state.active()}
-    for path in (workspace / "probes").iterdir():
+    for path in [*(workspace / "probes").glob("*.sql"), *(workspace / "probes").glob("*.py")]:
         if path.name not in active:
             path.unlink()
     for file, probe in active.items():
@@ -518,7 +519,7 @@ def finish(
         "probes": probes,
         "coverage": coverage(state, hunt.keys, hunt.clusters),
         "calibration": calibration(state),
-        "batches": by_batch(hunt, state),
+        "batches": batch_counts(hunt, state),
         "unverified": {probe: [key for key in keys if key not in state.readings]
                        for probe, keys in state.hits.items()},
         "final": {"read": len(final), "found": sum(reading.found for reading in final), "blind": len(blind),
@@ -530,7 +531,7 @@ def finish(
     return report
 
 
-def by_batch(hunt: Hunt, state: HuntState) -> list[dict[str, Any]]:
+def batch_counts(hunt: Hunt, state: HuntState) -> list[dict[str, Any]]:
     """Per batch and stratum of traj.yaml: the trajectories, how many were read and confirmed, by facet, and how many
     the active probes hit that no read covered."""
     members: dict[tuple[str, str], list[str]] = {}
@@ -578,7 +579,7 @@ def keep_probes(project: Project, name: str, state: HuntState, probes: list[dict
 def mark_trajectories(project: Project, name: str) -> dict[str, Any]:
     """Enable the marks of the hunt in traj.yaml, unless they are enabled, and compute them on every trajectory;
     return the group, the facet of every feature, and per feature the marked trajectories."""
-    group = instance_name(name)
+    group = marks_instance(name)
 
     def enable(operators: list[Any]) -> None:
         if not any(operator.get("as") == group for operator in operators):

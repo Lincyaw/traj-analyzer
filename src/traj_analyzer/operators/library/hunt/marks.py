@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationInfo, model_validator
 
-from traj_analyzer.hunting.kept import Marks, load_marks, mark
+from traj_analyzer.hunting.marks import Marks, load_marks, mark_trajectory
 from traj_analyzer.layers.tables import Tables
 from traj_analyzer.operators.base import EventMark, FeatureSpec, Operator
 from traj_analyzer.operators.catalog import ROOT
@@ -50,7 +50,7 @@ def outputs(params: Params) -> list[FeatureSpec]:
 
 
 def compute(trajectory: Trajectory, tables: Tables, params: Params) -> dict[str, Any]:
-    return mark(params.marks, trajectory, tables)
+    return mark_trajectory(params.marks, trajectory, tables)
 
 
 def tables_of(params: Params) -> tuple[str, ...]:

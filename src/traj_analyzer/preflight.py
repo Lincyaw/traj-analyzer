@@ -65,7 +65,7 @@ def check_function(project: Project) -> AiFunction[Any, Any]:
                       timeout_s=project.config.extract.timeout_s, attempts=1)
 
 
-def installed(project: Project) -> str:
+def check_installation(project: Project) -> str:
     """Check what a worker needs before it starts: the variables `engine.env_passthrough` names, the files of
     `engine.patches`, the dsh runtime aifn requires, and a copy of the aifn bundle in the profile that equals the one
     aifn ships; return the version of dsh."""
@@ -107,7 +107,7 @@ def preflight(project: Project, spawn: Spawn) -> dict[str, Any]:
     reads a file of random content and prints its sha256, which the model cannot give without running it.
     """
     started = time.monotonic()
-    version = installed(project)
+    version = check_installation(project)
     directory = project.data_dir / "check"
     directory.mkdir(parents=True, exist_ok=True)
     token = secrets.token_hex(32)
