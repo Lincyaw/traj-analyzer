@@ -109,8 +109,12 @@ Everything under `.traj/` can be regenerated from those files and the raw data.
 | | `is_error` | whether a `tool_result` is an error |
 | | `timestamp` | time stamp |
 | | `arguments` | the JSON text of the arguments of a `tool_call`, set by an adapter that parses the call; empty when `content` holds the arguments as written |
+| | `source_step` | the step of the source this step was parsed from, for a source that numbers its own steps; empty when the source numbers nothing |
 
 A trajectory is identified globally by `<dataset>/<id>`, called its key.
+`index` numbers the steps of a trajectory from 0 and is what the step heading, the tables and every citation of a position use.
+`source_step` is the source's own number, which another system reading the same source addresses positions by; it is held in the trajectory file and in no table, since a probe and an operator work in the numbering of `index`.
+A source that groups a turn into one step, such as an ATIF trajectory, gives several steps the same `source_step`, since one turn holds a message, its reasoning, its tool calls and their results.
 A `notice` is text the harness wrote under the user's role; it is no message the user typed, so it opens no turn, and it is rendered as `### #<n> user · notice · <name>`.
 
 ### 4.1 Adapters

@@ -25,6 +25,11 @@ class Step(BaseModel):
     arguments: str | None = None
     """The JSON text of the arguments of a `tool_call` step, set by an adapter that parses the call; None when the
     content holds the arguments as written."""
+    source_step: int | None = None
+    """The step of the source this step was parsed from, for a source that numbers its own steps, such as the
+    `step_id` of an ATIF trajectory. Several steps of one source step carry the same number, since a source step
+    can hold a message, its reasoning, its tool calls and their results. None when the source numbers nothing,
+    and the number is the source's own, which says nothing about the order of the steps here."""
 
     @property
     def is_user_message(self) -> bool:
