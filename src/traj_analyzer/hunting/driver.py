@@ -88,7 +88,7 @@ Answers = list[tuple[list[Case], dict[str, CaseVerdict], str]]
 
 def hunt(
     project: Project, name: str, *, max_rounds: int | None = None, workers: int | None = None,
-    runner: WorkerRunner | None = None,
+    runner: WorkerRunner | None = None, new_run: bool = False,
 ) -> dict[str, Any]:
     """Search the trajectories for what the hunt asks for with the aifn functions of the hunt, round after round,
     until `patience` rounds in a row find nothing new or `max_rounds` is reached; then read what the active probes
@@ -100,7 +100,7 @@ def hunt(
     """
     runner = runner or SubprocessWorkers()
     runner.check_credentials(project)
-    found = open_hunt(project, name, create=True, max_rounds=max_rounds)
+    found = open_hunt(project, name, create=True, max_rounds=max_rounds, new_run=new_run)
     if (found.directory / PENDING).is_file():
         raise ConfigError(f"Round of {found.directory} waits for the verdicts of an agent session; hand them in "
                           f"with `traj hunt verdicts {name}`")

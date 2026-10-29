@@ -367,16 +367,20 @@ def cmd_hunt_run(
     max_rounds: Annotated[int | None, typer.Option(min=1, help="At most this many rounds; default from the "
                                                                "hunt.")] = None,
     workers: Workers = None,
+    new_run: Annotated[bool, typer.Option(help="Start a new numbered run and preserve the unfinished run.")] = False,
 ) -> None:
     """Run the whole search with the aifn functions of the hunt: propose probes, read what they hit and a sample of
     what they miss, and refine them until rounds in a row find nothing new."""
-    _emit(hunt(Project.find(), name, max_rounds=max_rounds, workers=workers))
+    _emit(hunt(Project.find(), name, max_rounds=max_rounds, workers=workers, new_run=new_run))
 
 
 @hunt_app.command("start")
-def cmd_hunt_start(name: HuntName) -> None:
+def cmd_hunt_start(
+    name: HuntName,
+    new_run: Annotated[bool, typer.Option(help="Start a new numbered run and preserve the unfinished run.")] = False,
+) -> None:
     """Start a run for an agent session, or continue the one in progress, and write what its next step reads."""
-    _emit(start_hunt(Project.find(), name))
+    _emit(start_hunt(Project.find(), name, new_run=new_run))
 
 
 @hunt_app.command("status")

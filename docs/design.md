@@ -1264,6 +1264,8 @@ Far more findings with the hits than without them means the hits sway the reader
 The batches give, per batch and stratum of `traj.yaml`, the trajectories, how many were read and confirmed, the confirmed ones by facet, and how many the active probes hit that no read covered.
 The state after every round is `.traj/hunts/<name>/<run>/state/<round>.json`, and the clusters are `clusters.json` of the run.
 A run without `report.json` continues from its last state when the hunt runs again, and the calls it made are answered from the mailbox, since every request holds the digests of the files it builds on and the draws follow the seed; a run with `report.json` is finished, and the next one gets a new number.
+The explicit `--new-run` option of `traj hunt run` and `traj hunt start` starts a separately numbered run even when the preceding run is unfinished, preserving every existing state and model call.
+The new run uses the current conversations and the probes kept by the last completed run, while resuming a run still requires its original conversation set.
 
 ### 18.7 Marks
 

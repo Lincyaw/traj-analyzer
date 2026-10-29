@@ -87,10 +87,10 @@ def _parse[M: BaseModel](model: type[M], path: Path) -> M:
         raise ConfigError(f"{path} does not fit its schema: {error}") from error
 
 
-def start_hunt(project: Project, name: str) -> dict[str, Any]:
+def start_hunt(project: Project, name: str, *, new_run: bool = False) -> dict[str, Any]:
     """Start a run of the hunt for an agent session, or continue the one in progress: prepare the workspace and
     write what the next step reads."""
-    hunt = open_hunt(project, name, create=True)
+    hunt = open_hunt(project, name, create=True, new_run=new_run)
     prepare(project, hunt.workspace, hunt.spec, hunt.keys)
     if not (hunt.directory / PENDING).is_file():
         state = resume(hunt.directory) or start(project, name)

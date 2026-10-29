@@ -56,8 +56,11 @@ class Hunt:
         return hunt_model(self.project, self.spec)
 
 
-def open_hunt(project: Project, name: str, *, create: bool, max_rounds: int | None = None) -> Hunt:
+def open_hunt(project: Project, name: str, *, create: bool, max_rounds: int | None = None,
+              new_run: bool = False) -> Hunt:
     """The run of a hunt with what its rounds share; `create` starts a new run when the last one is finished."""
+    if new_run and not create:
+        raise ConfigError("A new hunt run requires create=True")
     spec = load_hunt(project, name)
     if max_rounds is not None:
         spec = HuntSpec.model_validate({**spec.model_dump(), "max_rounds": max_rounds})
@@ -70,7 +73,7 @@ def open_hunt(project: Project, name: str, *, create: bool, max_rounds: int | No
     if not frame.columns:
         raise ConfigError("No extracted features tell the trajectories apart; run `traj extract`")
     keys = [row.key for row in rows]
-    directory = run_directory(project, name) if create else open_run(project, name)
+    directory = run_directory(project, name, new_run=new_run) if create else open_run(project, name)
     matrix = frame.matrix(dict.fromkeys(frame.columns, 1.0))
     batch = assign(project, frame, rows, project.config.batches)
     stratum = assign(project, frame, rows, project.config.strata)
@@ -96,11 +99,11 @@ def finished_runs(project: Project, name: str) -> list[int]:
             if (project.hunting_dir / name / str(number) / REPORT).is_file()]
 
 
-def run_directory(project: Project, name: str) -> Path:
+def run_directory(project: Project, name: str, *, new_run: bool = False) -> Path:
     """The directory of the run to continue: the last one when it has no report yet, a new one otherwise."""
     numbers = run_numbers(project, name)
     number = numbers[-1] if numbers else 1
-    if (project.hunting_dir / name / str(number) / REPORT).is_file():
+    if numbers and (new_run or (project.hunting_dir / name / str(number) / REPORT).is_file()):
         number += 1
     directory = project.hunting_dir / name / str(number)
     directory.mkdir(parents=True, exist_ok=True)
@@ -126,8 +129,8 @@ def _clusters(directory: Path, keys: list[str], matrix: Matrix, spec: HuntSpec) 
     if path.is_file():
         clusters: dict[str, int] = json.loads(path.read_text(encoding="utf-8"))
         if sorted(clusters) != keys:
-            raise ConfigError(f"The trajectories of the hunt changed since its run in {directory} started; remove "
-                              f"that directory to start the run again")
+            raise ConfigError(f"The trajectories of the hunt changed since its run in {directory} started; "
+                              f"start a separate run with `traj hunt run {spec.name} --new-run`")
         return clusters
     clusters = clusters_of(keys, matrix, spec.clusters, spec.seed)
     path.write_text(json.dumps(clusters, indent=1, sort_keys=True), encoding="utf-8")
