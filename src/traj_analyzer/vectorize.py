@@ -153,7 +153,8 @@ def build_frame(
             types[feature.name] = feature.type
             extracted[feature.name] = present
             if feature.type == "paths":
-                paths[feature.name] = pd.Series(raw, dtype=object).reindex(index)
+                paths[feature.name] = pd.Series(raw, dtype=object).reindex(index).where(
+                    lambda values: values.notna(), None)
                 levels[feature.name] = list(feature.levels or ())
             if feature.type == "event":
                 events[feature.name] = pd.Series(raw, dtype=object).reindex(index)
@@ -201,7 +202,7 @@ def _expand_paths(
     rare ones stop at an ancestor; `__rare` is the share of events that stop above the last level.
     """
     name = feature.name
-    tree = PathTree.build(list(feature.levels or ()), series, support)
+    tree = PathTree.build(list(feature.levels or ()), series.dropna(), support)
     shares = tree.share_frame(series)
     reserved = sorted({"count", "rare"} & set(shares.columns))
     if reserved:
