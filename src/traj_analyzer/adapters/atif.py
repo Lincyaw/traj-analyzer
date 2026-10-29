@@ -68,7 +68,9 @@ class Steps:
             if text:
                 self.add(role, "message", text, turn)
         for call in turn.get("tool_calls") or []:
-            arguments = json.dumps(call["arguments"], ensure_ascii=False, sort_keys=True)
+            # The keys keep the order the producer wrote them in, which is the order the model sent, since a
+            # probe reads the arguments as text.
+            arguments = json.dumps(call["arguments"], ensure_ascii=False)
             self.tools[call["tool_call_id"]] = call["function_name"]
             self.add(role, "tool_call", arguments, turn, name=call["function_name"], arguments=arguments)
         for result in (turn.get("observation") or {}).get("results") or []:
