@@ -73,7 +73,7 @@ class AtifAdapter:
     A document also embeds the conversations the agent delegated, each a trajectory of the format with its own
     steps numbered from 1, and each becomes a trajectory here: a conversation nobody reads is a part of the run
     nobody oversees, and on the recorded corpus those conversations hold about a quarter of the turns. Its
-    identity is the holding trajectory's identity, `#` and its own `trajectory_id`, since the format requires
+    identity is the holding trajectory's identity, `.` and its own `trajectory_id`, since the format requires
     that id to be unique among its siblings alone. `conversation` says which conversation a trajectory is and
     `parent_trajectory` names the one holding it, so an operator, a hunt and a page can read either the run's own
     conversation or everything the run said. Everything a path or a source states about the run, such as the task
