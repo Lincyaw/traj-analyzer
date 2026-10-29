@@ -357,6 +357,8 @@ calls:
 A feature's `scope`, a condition over the extracted code features, limits a judgment to the trajectories where its question arises, and `anomaly_rank <= 200` limits it to the top anomalies once `traj anomalies` has run.
 
 Feature names are unique within a project, because they become column names of the wide table; a clash is a configuration error.
+An operator's original output name has at most 48 characters.
+An instance keeps both its prefix and that name in full, so namespacing cannot truncate identities or make separate features coincide.
 `traj.yaml` also names the parsing layers in `layers`; the layers an enabled operator reads tables of are run without being named.
 
 ### 5.4 Execution groups

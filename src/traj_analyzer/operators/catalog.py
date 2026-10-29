@@ -165,6 +165,8 @@ def instantiate(ref: OperatorRef, use: OperatorUse, root: Path) -> Instance:
         raise ConfigError(f"{ref.name} produces no outputs with the params {use.params}")
 
     def renamed(spec: FeatureSpec) -> FeatureSpec:
+        if len(spec.name) > 48:
+            raise ConfigError(f"{ref.name}: output name {spec.name!r} exceeds 48 characters before its prefix")
         name = f"{use.prefix}_{spec.name}" if use.prefix else spec.name
         return FeatureSpec.model_validate({**spec.model_dump(), "name": name})
 

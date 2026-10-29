@@ -59,6 +59,8 @@ class Definition(_Strict):
 
     @model_validator(mode="after")
     def _llm_shape(self) -> Definition:
+        if len(self.spec.name) > 48:
+            raise ValueError("a feature definition's name has at most 48 characters before an instance prefix")
         if self.reads == "text" and self.spec.type not in LLM_TYPES:
             raise ValueError(f"{self.spec.name}: a feature with reads=text is boolean, category or set")
         return self

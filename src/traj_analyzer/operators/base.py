@@ -19,7 +19,7 @@ memory, a tool, a peer agent or subagent, the local environment, or an external 
 Unit = Literal["trajectory", "turn", "window"]
 """What one call of a judgment operator covers: the whole trajectory, every turn of the user at once, or one window
 of steps."""
-_NAME = re.compile(r"[a-z][a-z0-9_]{0,47}")
+_NAME = re.compile(r"[a-z][a-z0-9_]*")
 
 
 class EventMark(BaseModel):
