@@ -18,6 +18,7 @@ from traj_analyzer.evaluation import evaluate, load_evaluation, reference_keys
 from traj_analyzer.extract import SubprocessWorkers, coverage, extract
 from traj_analyzer.files import parse_yaml
 from traj_analyzer.hunting import hunt
+from traj_analyzer.hunting.snapshot import repair_snapshot_tables
 from traj_analyzer.hunting.steps import close_hunt, start_hunt, status, submit_proposal, submit_verdicts
 from traj_analyzer.hunting.summary import summarize_run
 from traj_analyzer.hunting.trial import try_probe
@@ -425,6 +426,16 @@ def cmd_hunt_report(
     """What a finished run found, in brief: rounds with their minutes, facets, batches, probes, coverage, how blind
     reads and people's verdicts agree, the marks, and where the files are."""
     _emit(summarize_run(Project.find(), name, run))
+
+
+@hunt_app.command("repair-tables")
+def cmd_hunt_repair_tables(
+    name: HuntName,
+    run: Annotated[int | None, typer.Option(min=1, help="The run; default the last finished one.")] = None,
+    dry_run: Annotated[bool, typer.Option(help="Validate and list missing rows without writing them.")] = False,
+) -> None:
+    """Complete missing core snapshot rows after checking the source against the run's saved whole contents."""
+    _emit(repair_snapshot_tables(Project.find(), name, run, dry_run=dry_run))
 
 
 @app.command("try")

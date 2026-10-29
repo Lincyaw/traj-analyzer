@@ -10,6 +10,7 @@ from traj_analyzer.events import rules as rules_module
 from traj_analyzer.hunting.contents import CONTENTS, CONTENTS_SCHEMA, write_contents
 from traj_analyzer.hunting.functions import NEED, SCENARIO
 from traj_analyzer.hunting.probes import readable_tables
+from traj_analyzer.hunting.snapshot import validate_extracted_trajectories
 from traj_analyzer.hunting.spec import HuntSpec
 from traj_analyzer.ingest import load_trajectory, render_markdown
 from traj_analyzer.layers import describe_tables
@@ -46,6 +47,7 @@ def prepare(project: Project, workspace: Path, spec: HuntSpec, keys: list[str]) 
 
     Every file is written from the project's state alone, so a hunt that runs again starts from the same files.
     """
+    validate_extracted_trajectories(project, keys)
     for directory in ("notes", "operators", "probes", "rounds", TABLES):
         (workspace / directory).mkdir(parents=True, exist_ok=True)
     for key in keys:
