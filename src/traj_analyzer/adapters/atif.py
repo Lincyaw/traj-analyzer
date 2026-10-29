@@ -16,6 +16,17 @@ from traj_analyzer.schema import INJECTED, Kind, Role, Step, Trajectory
 VERSIONS = {"ATIF-v1.8"}
 """The schema versions of the Agent Trajectory Interchange Format this adapter was read against."""
 SOURCES: dict[str, Role] = {"system": "system", "user": "user", "agent": "assistant"}
+CONVERSATION = "conversation"
+"""The metadata key saying which conversation of its document a trajectory is, `main` or `subagent`."""
+MAIN = "main"
+SUBAGENT = "subagent"
+PARENT = "parent_trajectory"
+"""The metadata key of a subagent conversation, holding the identity of the conversation it is embedded in."""
+HELD = "."
+"""What separates a subagent conversation's own identity from the identity of the trajectory holding it: the
+format requires an embedded `trajectory_id` to be unique among its siblings alone, so the identity of the
+document it belongs to is what makes it unique in a project. A dot because `traj ingest` keeps one, so the
+identity a project stores is the identity read here."""
 
 
 class AtifSource(BaseModel):
@@ -28,6 +39,10 @@ class AtifSource(BaseModel):
     identity: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     recorded_calls: list[str] | None = None
+    subagent_calls: dict[str, list[str]] = Field(default_factory=dict)
+    """The recorded calls of each conversation the document embeds, by its own `trajectory_id`. A source that
+    reports the calls of a run reports them per conversation, since each conversation is a trajectory with its
+    own steps and its own calls."""
 
 
 @dataclass
@@ -46,7 +61,7 @@ class _Parse:
 
 
 class AtifAdapter:
-    """Trajectories in the Agent Trajectory Interchange Format, one file holding one trajectory.
+    """Trajectories in the Agent Trajectory Interchange Format, one file holding one document.
 
     An ATIF step is a turn, so the steps here are the message, the reasoning, the tool calls and the results of
     one turn. The trajectory is identified by the document's `trajectory_id`. The agent, the model, the final
@@ -54,6 +69,15 @@ class AtifAdapter:
     of `traj ingest` holds of a trajectory too. The metrics of the format carry a producer's own figures in their
     own `extra`, which is where a price goes when the format's `total_cost_usd` would name a currency the
     provider never stated, so those figures become metadata under the same `metrics_` names.
+
+    A document also embeds the conversations the agent delegated, each a trajectory of the format with its own
+    steps numbered from 1, and each becomes a trajectory here: a conversation nobody reads is a part of the run
+    nobody oversees, and on the recorded corpus those conversations hold about a quarter of the turns. Its
+    identity is the holding trajectory's identity, `#` and its own `trajectory_id`, since the format requires
+    that id to be unique among its siblings alone. `conversation` says which conversation a trajectory is and
+    `parent_trajectory` names the one holding it, so an operator, a hunt and a page can read either the run's own
+    conversation or everything the run said. Everything a path or a source states about the run, such as the task
+    and the trial, is the same for every conversation of it, which is what puts them in one batch.
 
     `path_metadata` is a regular expression searched in the path of the file; its named groups become metadata.
     `harness_key` names the metadata key that holds the harness, and `harnesses` maps its values to the names of
@@ -106,10 +130,7 @@ class AtifAdapter:
 
     def read(self, path: Path, dataset: str) -> Iterator[Trajectory]:
         source = self.read_source(path)
-        version = source.document["schema_version"]
-        if version not in VERSIONS:
-            raise ValueError(f"{path} declares the trajectory format {version!r}, and this adapter reads "
-                             f"{sorted(VERSIONS)}")
+        self._check_version(path, source.document)
         digest = hashlib.sha256(json.dumps(source.document, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         if source.identity in self.read_so_far:
             first, seen = self.read_so_far[source.identity]
@@ -117,10 +138,33 @@ class AtifAdapter:
                 raise ValueError(f"{path} holds the trajectory of {first} with another document")
             return
         self.read_so_far[source.identity] = (path, digest)
-        yield self._trajectory(path, dataset, source)
+        yield self._trajectory(path, dataset, source.document, source.identity, source.metadata,
+                               {CONVERSATION: MAIN}, source.recorded_calls)
+        for embedded in source.document.get("subagent_trajectories") or []:
+            self._check_version(path, embedded)
+            held = str(embedded.get("trajectory_id") or "")
+            if not held:
+                raise ValueError(f"{path} embeds a conversation with no trajectory_id, which the format requires "
+                                 f"of an embedded trajectory and which identifies it among the others")
+            yield self._trajectory(
+                path, dataset, embedded, f"{source.identity}{HELD}{held}", source.metadata,
+                {CONVERSATION: SUBAGENT, PARENT: source.identity}, source.subagent_calls.get(held))
 
-    def _trajectory(self, path: Path, dataset: str, source: AtifSource) -> Trajectory:
-        document = source.document
+    def _check_version(self, path: Path, document: dict[str, Any]) -> None:
+        version = document["schema_version"]
+        if version not in VERSIONS:
+            raise ValueError(f"{path} declares the trajectory format {version!r}, and this adapter reads "
+                             f"{sorted(VERSIONS)}")
+
+    def _trajectory(self, path: Path, dataset: str, document: dict[str, Any], identity: str,
+                    known: dict[str, Any], relation: dict[str, Any],
+                    recorded_calls: list[str] | None) -> Trajectory:
+        """One conversation of a document as a trajectory: the document's own when `relation` says it is the main
+        one, and a conversation it embeds otherwise.
+
+        `relation` is written last because which conversation this is, and which conversation holds it, is what
+        the document says; nothing a source or a path states about the run can restate it.
+        """
         agent = document.get("agent") or {}
         metrics = document.get("final_metrics") or {}
         metadata: dict[str, Any] = {
@@ -130,18 +174,21 @@ class AtifAdapter:
             **{f"metrics_{name}": value for name, value in metrics.items() if name != "extra"},
             **{f"metrics_{name}": value for name, value in (metrics.get("extra") or {}).items()},
             **(document.get("extra") or {}),
-            **source.metadata,
+            **known,
             **self.path_groups(path),
+            **relation,
         }
         harness = None
         if self.harness_key is not None:
             value = str(metadata[self.harness_key])
             harness = self.harnesses.get(value, value)
-        parse = _Parse()
+        # Nobody typed anything in a conversation the agent delegated, so with `single_prompt` its opening
+        # message is the harness writing too, and the conversation opens no turn of the person.
+        parse = _Parse(answered=relation[CONVERSATION] == SUBAGENT)
         for turn in document["steps"]:
             self._turn(parse, turn)
-        return Trajectory(id=source.identity, dataset=dataset, harness=harness, steps=parse.steps,
-                          recorded_calls=source.recorded_calls,
+        return Trajectory(id=identity, dataset=dataset, harness=harness, steps=parse.steps,
+                          recorded_calls=recorded_calls,
                           metadata={name: value for name, value in metadata.items() if _is_scalar(value)})
 
     def _turn(self, parse: _Parse, turn: dict[str, Any]) -> None:
