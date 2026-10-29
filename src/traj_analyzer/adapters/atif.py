@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from traj_analyzer.adapters._blocks import PLACEHOLDERS
 from traj_analyzer.schema import INJECTED, Kind, Role, Step, Trajectory
 
-VERSIONS = {"ATIF-v1.8"}
+VERSIONS = {"ATIF-v1.7", "ATIF-v1.8"}
 """The schema versions of the Agent Trajectory Interchange Format this adapter was read against."""
 SOURCES: dict[str, Role] = {"system": "system", "user": "user", "agent": "assistant"}
 CONVERSATION = "conversation"
@@ -27,6 +27,10 @@ HELD = "."
 format requires an embedded `trajectory_id` to be unique among its siblings alone, so the identity of the
 document it belongs to is what makes it unique in a project. A dot because `traj ingest` keeps one, so the
 identity a project stores is the identity read here."""
+
+
+def document_digest(document: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(document, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 class AtifSource(BaseModel):
@@ -63,10 +67,10 @@ class _Parse:
 class AtifAdapter:
     """Trajectories in the Agent Trajectory Interchange Format, one file holding one document.
 
-    An ATIF step is a turn, so the steps here are the message, the reasoning, the tool calls and the results of
-    one turn. The trajectory is identified by the document's `trajectory_id`. The agent, the model, the final
-    metrics and the producer's own `extra` become metadata, their scalar values alone, which is what the index row
-    of `traj ingest` holds of a trajectory too. The metrics of the format carry a producer's own figures in their
+    An ATIF step is a turn with its message, reasoning, tool calls and results.
+    The trajectory uses the document's `trajectory_id` when present, or its content digest.
+    The agent, model, final metrics and producer's `extra` become scalar metadata, as in the index of `traj ingest`.
+    The metrics of the format carry a producer's own figures in their
     own `extra`, which is where a price goes when the format's `total_cost_usd` would name a currency the
     provider never stated, so those figures become metadata under the same `metrics_` names.
 
@@ -123,6 +127,8 @@ class AtifAdapter:
         check and the single reading of a trajectory several files hold stay here."""
         document = json.loads(path.read_bytes())
         identity = document.get("trajectory_id")
+        if identity is None:
+            identity = document_digest(document)
         if not identity:
             raise ValueError(f"{path} holds a trajectory with no trajectory_id, which identifies a trajectory of "
                              f"this format")
@@ -131,7 +137,7 @@ class AtifAdapter:
     def read(self, path: Path, dataset: str) -> Iterator[Trajectory]:
         source = self.read_source(path)
         self._check_version(path, source.document)
-        digest = hashlib.sha256(json.dumps(source.document, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        digest = document_digest(source.document)
         if source.identity in self.read_so_far:
             first, seen = self.read_so_far[source.identity]
             if seen != digest:
