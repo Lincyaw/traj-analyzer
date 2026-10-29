@@ -109,12 +109,9 @@ Everything under `.traj/` can be regenerated from those files and the raw data.
 | | `is_error` | whether a `tool_result` is an error |
 | | `timestamp` | time stamp |
 | | `arguments` | the JSON text of the arguments of a `tool_call`, set by an adapter that parses the call; empty when `content` holds the arguments as written |
-| | `source_step` | the step of the source this step was parsed from, for a source that numbers its own steps; empty when the source numbers nothing |
 
 A trajectory is identified globally by `<dataset>/<id>`, called its key.
 `index` numbers the steps of a trajectory from 0 and is what the step heading, the tables and every citation of a position use.
-`source_step` is the source's own number, which another system reading the same source addresses positions by; it is held in the trajectory file and in no table, since a probe and an operator work in the numbering of `index`.
-A source that groups a turn into one step, such as an ATIF trajectory, gives several steps the same `source_step`, since one turn holds a message, its reasoning, its tool calls and their results.
 A `notice` is text the harness wrote under the user's role; it is no message the user typed, so it opens no turn, and it is rendered as `### #<n> user · notice · <name>`.
 
 ### 4.1 Adapters
@@ -128,12 +125,12 @@ An adapter whose source records the calls of the agent apart from the conversati
 `traj ingest` stops at the first trajectory whose `tool_call` steps lack one of them, counted by tool, before anything of that dataset is written, so a parser that loses a call is found when the data is read.
 The recorded calls can be a part of the agent's calls, where the source reports one form of call and not another: the ATR recorder of the cgfs project reports the function calls of a response and not a call the model sends as a custom tool call, which the adapter parses from the body. So a parsed call the source does not report is no error.
 
-The built-in `atif` adapter reads a trajectory in the Agent Trajectory Interchange Format, one file holding one trajectory.
+The built-in `atif` adapter reads a trajectory in the Agent Trajectory Interchange Format, one file holding one trajectory, identified by the document's `trajectory_id`.
 An ATIF step is a turn, so each one becomes the steps of that turn in the order the turn holds them: the reasoning, the message, the tool calls, and the results of those calls, which the format requires on the step whose calls they answer.
-Every step of one turn carries that turn's `step_id` as `source_step`.
+A result that names no call of the trajectory stops ingestion, since a result paired with another call attributes every action, relation and event of that call to the wrong tool.
 `path_metadata` searches a regular expression in the path of the file and makes its named groups metadata; `harness_key` and `harnesses` name the harness; `notices` are patterns of user text the harness inserts, and with `single_prompt` every user message after the agent has answered is a notice too, since the person wrote only what the agent was given before it acted.
-With `subagents`, a subagent trajectory the document embeds is read as a trajectory of its own, identified by its `trajectory_id`.
-The format names media by path or URL and carries no text of it, so a media content part becomes a placeholder.
+The format names media by path or URL and carries no text of it, so a media content part becomes a placeholder; any other content part type stops ingestion with an error.
+An adapter of a source that holds an ATIF document otherwise, such as the ATR adapter of the cgfs project whose records a producer derives the document from, subclasses it and overrides `read_source`, which gives the document and the identity of one input file; the schema version check and the single reading of a trajectory several input files hold stay in `read`.
 
 The built-in `claude_code` adapter reads Claude Code session files.
 It reads `user` and `assistant` records in file order, so turns abandoned by a rewind stay in the trajectory.
