@@ -6,8 +6,10 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Literal
 
+from filelock import FileLock
 from pydantic import BaseModel
 from ruamel.yaml import YAML
 
@@ -245,11 +247,17 @@ def runtime_groups(project: Project) -> list[Group]:
 
 
 def edit_operators(project: Project, change: Callable[[list[Any]], None]) -> Project:
-    """Apply `change` to the operators list of traj.yaml, validate the result, then write it back.
+    """Apply `change` to the latest operators list under a project lock and replace traj.yaml atomically.
 
     The file keeps its comments and layout. Returns the project with the new configuration.
     """
     path = project.root / CONFIG_FILE
+    project.data_dir.mkdir(parents=True, exist_ok=True)
+    with FileLock(project.data_dir / "config.lock", fallback_to_soft=False, preserve_lock_file=True):
+        return _edit_configuration(project, path, change)
+
+
+def _edit_configuration(project: Project, path: Path, change: Callable[[list[Any]], None]) -> Project:
     editor = YAML()
     editor.preserve_quotes = True
     editor.width = 4096
@@ -262,7 +270,14 @@ def edit_operators(project: Project, change: Callable[[list[Any]], None]) -> Pro
     change(document["operators"])
     edited = Project(project.root, Config.model_validate(json.loads(json.dumps(document))))
     load_groups(edited)
-    editor.dump(document, path)
+    with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as temporary:
+        staged = Path(temporary.name)
+    try:
+        editor.dump(document, staged)
+        staged.chmod(path.stat().st_mode)
+        staged.replace(path)
+    finally:
+        staged.unlink(missing_ok=True)
     return edited
 
 
