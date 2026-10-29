@@ -51,7 +51,9 @@ class AtifAdapter:
     An ATIF step is a turn, so the steps here are the message, the reasoning, the tool calls and the results of
     one turn. The trajectory is identified by the document's `trajectory_id`. The agent, the model, the final
     metrics and the producer's own `extra` become metadata, their scalar values alone, which is what the index row
-    of `traj ingest` holds of a trajectory too.
+    of `traj ingest` holds of a trajectory too. The metrics of the format carry a producer's own figures in their
+    own `extra`, which is where a price goes when the format's `total_cost_usd` would name a currency the
+    provider never stated, so those figures become metadata under the same `metrics_` names.
 
     `path_metadata` is a regular expression searched in the path of the file; its named groups become metadata.
     `harness_key` names the metadata key that holds the harness, and `harnesses` maps its values to the names of
@@ -120,11 +122,13 @@ class AtifAdapter:
     def _trajectory(self, path: Path, dataset: str, source: AtifSource) -> Trajectory:
         document = source.document
         agent = document.get("agent") or {}
+        metrics = document.get("final_metrics") or {}
         metadata: dict[str, Any] = {
             "agent": agent.get("name"), "agent_version": agent.get("version"),
             "model": agent.get("model_name"), "session_id": document.get("session_id"),
             "trajectory_id": document.get("trajectory_id"),
-            **{f"metrics_{name}": value for name, value in (document.get("final_metrics") or {}).items()},
+            **{f"metrics_{name}": value for name, value in metrics.items() if name != "extra"},
+            **{f"metrics_{name}": value for name, value in (metrics.get("extra") or {}).items()},
             **(document.get("extra") or {}),
             **source.metadata,
             **self.path_groups(path),
