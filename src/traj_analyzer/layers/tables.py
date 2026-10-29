@@ -9,7 +9,9 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from filelock import FileLock
 
+from traj_analyzer.files import atomic_output
 from traj_analyzer.project import ConfigError, Project, RenderConfig
 from traj_analyzer.schema import Trajectory
 
@@ -181,14 +183,16 @@ class TableWriter:
             self._flush(name)
             new = pa.concat_tables(self.chunks[name]) if self.chunks[name] else schema.empty_table()
             path = table_path(self.project, name)
-            if path.is_file():
-                old = pq.read_table(path)
-                if old.schema.names == schema.names:
-                    covered = pc.is_in(old[KEY], value_set=pa.array(sorted(self.keys), pa.string()))
-                    if scopes and name in scopes:
-                        column, values = scopes[name]
-                        covered = pc.and_(covered, pc.is_in(old[column], value_set=pa.array(sorted(values),
-                                                                                              pa.string())))
-                    kept = old.filter(pc.invert(pc.fill_null(covered, False)))
-                    new = pa.concat_tables([kept.cast(schema), new])
-            pq.write_table(new, path)
+            with FileLock(path.with_suffix(".lock"), fallback_to_soft=False, preserve_lock_file=True):
+                if path.is_file():
+                    old = pq.read_table(path)
+                    if old.schema.names == schema.names:
+                        covered = pc.is_in(old[KEY], value_set=pa.array(sorted(self.keys), pa.string()))
+                        if scopes and name in scopes:
+                            column, values = scopes[name]
+                            covered = pc.and_(covered, pc.is_in(old[column], value_set=pa.array(sorted(values),
+                                                                                                  pa.string())))
+                        kept = old.filter(pc.invert(pc.fill_null(covered, False)))
+                        new = pa.concat_tables([kept.cast(schema), new])
+                with atomic_output(path) as staged:
+                    pq.write_table(new, staged)

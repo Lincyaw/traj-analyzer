@@ -8,7 +8,9 @@ from typing import Any, Literal
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from filelock import FileLock
 
+from traj_analyzer.files import atomic_output
 from traj_analyzer.operators.base import FeatureSpec
 from traj_analyzer.operators.catalog import Group
 from traj_analyzer.project import Project
@@ -79,11 +81,13 @@ def write_group(project: Project, group: Group, rows: Iterable[FeatureRow], dire
         record[f"{row.feature}__detail"] = row.detail
         record[f"{row.feature}__evidence"] = row.evidence
     table = pa.Table.from_pylist(list(records.values()), schema=schema(group))
-    old = read_group(project, group, directory)
-    kept = old.filter(pc.invert(pc.is_in(old[KEY], value_set=table[KEY])))
     path = (directory or project.table_dir) / f"{group.name}.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.concat_tables([kept, table]), path)
+    with FileLock(path.with_suffix(".lock"), fallback_to_soft=False, preserve_lock_file=True):
+        old = read_group(project, group, directory)
+        kept = old.filter(pc.invert(pc.is_in(old[KEY], value_set=table[KEY])))
+        with atomic_output(path) as staged:
+            pq.write_table(pa.concat_tables([kept, table]), staged)
 
 
 def read_group(project: Project, group: Group, directory: Path | None = None) -> pa.Table:

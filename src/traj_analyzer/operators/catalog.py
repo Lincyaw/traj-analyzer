@@ -6,14 +6,13 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any, Literal
 
 from filelock import FileLock
 from pydantic import BaseModel
 from ruamel.yaml import YAML
 
-from traj_analyzer.files import load_module
+from traj_analyzer.files import atomic_output, load_module
 from traj_analyzer.layers.tables import Tables
 from traj_analyzer.operators.base import Aggregate, FeatureSpec, Operator, Unit
 from traj_analyzer.project import (
@@ -270,14 +269,8 @@ def _edit_configuration(project: Project, path: Path, change: Callable[[list[Any
     change(document["operators"])
     edited = Project(project.root, Config.model_validate(json.loads(json.dumps(document))))
     load_groups(edited)
-    with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as temporary:
-        staged = Path(temporary.name)
-    try:
+    with atomic_output(path) as staged:
         editor.dump(document, staged)
-        staged.chmod(path.stat().st_mode)
-        staged.replace(path)
-    finally:
-        staged.unlink(missing_ok=True)
     return edited
 
 

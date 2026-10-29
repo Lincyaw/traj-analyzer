@@ -5,11 +5,27 @@ import importlib.util
 import json
 import sys
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from types import ModuleType
 from typing import Any
 
 from ruamel.yaml import YAML
+
+
+@contextmanager
+def atomic_output(path: Path) -> Iterator[Path]:
+    """Yield a staging file beside the destination and replace the destination after a successful write."""
+    with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as temporary:
+        staged = Path(temporary.name)
+    try:
+        yield staged
+        if path.is_file():
+            staged.chmod(path.stat().st_mode)
+        staged.replace(path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def read_yaml(path: Path) -> Any:
