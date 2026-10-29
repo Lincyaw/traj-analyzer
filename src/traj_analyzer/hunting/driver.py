@@ -48,7 +48,7 @@ from traj_analyzer.hunting.ledger import (
     probe_ledger,
     unproductive,
 )
-from traj_analyzer.hunting.marks import OPERATOR, marks_instance
+from traj_analyzer.hunting.marks import enable_marks, marks_instance
 from traj_analyzer.hunting.probes import HITS_SCHEMA, probe_path, run_probes
 from traj_analyzer.hunting.run import (
     FINAL,
@@ -435,11 +435,7 @@ def mark_trajectories(hunt: Hunt, state: HuntState) -> dict[str, Any]:
     project, name = hunt.project, hunt.name
     group = marks_instance(name)
 
-    def enable(operators: list[Any]) -> None:
-        if not any(operator.get("as") == group for operator in operators):
-            operators.append({"use": OPERATOR, "as": group, "params": {"hunt": name}})
-
-    edited = edit_operators(project, enable)
+    edited = enable_marks(project, name)
     extract(edited, groups=[group])
     ((instance,),) = [found.instances for found in load_groups(edited, [group])]
     events = read_table(edited, "events").to_pandas()

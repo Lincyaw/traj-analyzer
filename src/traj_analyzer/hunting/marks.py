@@ -15,6 +15,7 @@ from traj_analyzer.ingest import shown_keys, visible_metadata
 from traj_analyzer.layers.tables import KEY, Tables, with_key
 from traj_analyzer.mining.operators import load_code_operator
 from traj_analyzer.operators.base import Event, Operator
+from traj_analyzer.operators.catalog import edit_operators
 from traj_analyzer.project import ConfigError, Project
 from traj_analyzer.schema import Trajectory
 
@@ -25,6 +26,18 @@ OPERATOR = "hunt.marks"
 def marks_instance(hunt: str) -> str:
     """The instance of the marks operator of a hunt in traj.yaml, which is also its execution group."""
     return f"hunt-{hunt}"
+
+
+def enable_marks(project: Project, hunt: str) -> Project:
+    """Enable a hunt's marks with its own feature prefix, preserving any existing registration."""
+    group = marks_instance(hunt)
+
+    def enable(operators: list[Any]) -> None:
+        if not any(operator.get("as") == group for operator in operators):
+            operators.append({"use": OPERATOR, "as": group, "prefix": hunt.replace("-", "_"),
+                              "params": {"hunt": hunt}})
+
+    return edit_operators(project, enable)
 
 
 @dataclass(frozen=True)
