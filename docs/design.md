@@ -125,12 +125,20 @@ An adapter whose source records the calls of the agent apart from the conversati
 `traj ingest` stops at the first trajectory whose `tool_call` steps lack one of them, counted by tool, before anything of that dataset is written, so a parser that loses a call is found when the data is read.
 The recorded calls can be a part of the agent's calls, where the source reports one form of call and not another: the ATR recorder of the cgfs project reports the function calls of a response and not a call the model sends as a custom tool call, which the adapter parses from the body. So a parsed call the source does not report is no error.
 
-The built-in `atif` adapter reads a trajectory in the Agent Trajectory Interchange Format, one file holding one trajectory, identified by the document's `trajectory_id`.
+The built-in `atif` adapter reads trajectories in the Agent Trajectory Interchange Format, one file holding one document, whose own trajectory is identified by its `trajectory_id`.
 An ATIF step is a turn, so each one becomes the steps of that turn in the order the turn holds them: the reasoning, the message, the tool calls, and the results of those calls, which the format requires on the step whose calls they answer.
 A result that names no call of the trajectory stops ingestion, since a result paired with another call attributes every action, relation and event of that call to the wrong tool.
 `path_metadata` searches a regular expression in the path of the file and makes its named groups metadata; `harness_key` and `harnesses` name the harness; `notices` are patterns of user text the harness inserts, and with `single_prompt` every user message after the agent has answered is a notice too, since the person wrote only what the agent was given before it acted.
 The format names media by path or URL and carries no text of it, so a media content part becomes a placeholder; any other content part type stops ingestion with an error.
-An adapter of a source that holds an ATIF document otherwise, such as the ATR adapter of the cgfs project whose records a producer derives the document from, subclasses it and overrides `read_source`, which gives the document and the identity of one input file; the schema version check and the single reading of a trajectory several input files hold stay in `read`.
+
+A document also embeds the conversations the agent delegated, each a trajectory of the format with its own steps numbered from 1, and each becomes a trajectory of the project: a conversation nobody reads is a part of the run nobody oversees, and on the recorded corpus of the cgfs project those conversations hold about a quarter of the turns.
+The identity of such a conversation is the holding trajectory's identity, a dot and its own `trajectory_id`, since the format requires that id to be unique among its siblings alone; a dot because `traj ingest` keeps one, so the identity a project stores is the identity the adapter read.
+The metadata key `conversation` says which conversation a trajectory is, `main` or `subagent`, and `parent_trajectory` holds the identity of the one that delegated it, which with the trajectory's own dataset gives that conversation's key.
+Everything a path or a source states about the run, such as the task and the trial, is the same for every conversation of it, which is what puts them in one batch.
+Nobody typed anything in a delegated conversation, so under `single_prompt` its opening message is the harness writing too and the conversation opens no turn of the person.
+A step reference recorded against the conversation the run opened with keeps pointing at the same step, since that conversation's identity and steps do not change when the others are read.
+
+An adapter of a source that holds an ATIF document otherwise, such as the ATR adapter of the cgfs project whose records a producer derives the document from, subclasses it and overrides `read_source`, which gives the document, the identity of one input file, and the recorded calls of each of its conversations; the schema version check and the single reading of a document several input files hold stay in `read`.
 
 The built-in `claude_code` adapter reads Claude Code session files.
 It reads `user` and `assistant` records in file order, so turns abandoned by a rewind stay in the trajectory.
