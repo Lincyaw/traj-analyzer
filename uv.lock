@@ -839,7 +839,7 @@ requires-dist = [
     { name = "aifn", extras = ["deepseek"], git = "https://github.com/Lincyaw/aifn?rev=7938dd2f4437fa7605f583610a301f3c2427831b" },
     { name = "duckdb", specifier = ">=1.5.5" },
     { name = "fastapi", specifier = ">=0.141.1" },
-    { name = "filelock", specifier = ">=4.0.3" },
+    { name = "filelock", specifier = ">=3.32.7" },
     { name = "libdash", specifier = ">=0.5.0" },
     { name = "numpy", specifier = ">=2.5.3" },
     { name = "pandas", specifier = ">=3.0.6" },
